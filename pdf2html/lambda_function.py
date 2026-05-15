@@ -2,7 +2,7 @@ import os
 import boto3
 import json
 import traceback
-import zipfile
+# import zipfile
 import tempfile
 import shutil
 import urllib.parse
@@ -40,6 +40,47 @@ def sanitize_filename(filename):
         sanitized = "document"
     
     return sanitized
+
+def find_final_html(output_dir, conversion_result=None):
+    """
+    Find the best final HTML file to upload as the single deliverable.
+    Prefer the remediated single-page output, then fall back to other HTML files.
+    """
+
+    # First try the remediation result path returned by the pipeline.
+    if conversion_result:
+        remediation_result = conversion_result.get("remediation_result", {})
+        output_path = remediation_result.get("output_path")
+
+        if output_path and os.path.isfile(output_path):
+            return output_path
+
+    preferred_filenames = [
+        "remediated_combined_document.html",
+        "remediated.html",
+        "index.html",
+        "result.html",
+        "combined_document.html"
+    ]
+
+    for preferred in preferred_filenames:
+        for root, _, files in os.walk(output_dir):
+            if preferred in files:
+                return os.path.join(root, preferred)
+
+    # Final fallback: any HTML file with "remediated" in the filename.
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.lower().endswith(".html") and "remediated" in file.lower():
+                return os.path.join(root, file)
+
+    # Last resort: any HTML file.
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.lower().endswith(".html"):
+                return os.path.join(root, file)
+
+    raise FileNotFoundError("No HTML output file found.")
 
 def lambda_handler(event, context):
     """
@@ -105,10 +146,14 @@ def lambda_handler(event, context):
         filename_base = os.path.splitext(sanitized_filename)[0]
         
         # IDEMPOTENCY CHECK: Re-enabled to prevent reprocessing the same file
-        # Try both sanitized and original filenames for backward compatibility
+        # # Try both sanitized and original filenames for backward compatibility
+        # output_check_keys = [
+        #     f"output/{filename_base}.zip",  # Sanitized filename
+        #     f"output/{os.path.splitext(original_filename)[0]}.zip"  # Original filename
+        # ]
         output_check_keys = [
-            f"output/{filename_base}.zip",  # Sanitized filename
-            f"output/{os.path.splitext(original_filename)[0]}.zip"  # Original filename
+            f"remediated/{filename_base}.html",
+            f"remediated/{os.path.splitext(original_filename)[0]}.html"
         ]
         
         output_exists = False
@@ -130,7 +175,8 @@ def lambda_handler(event, context):
                 "status": "skipped", 
                 "message": "Output already exists",
                 "input": f"s3://{bucket}/{key}",
-                "output_dir": f"s3://{bucket}/output/{filename_base}/"
+                # "output_dir": f"s3://{bucket}/output/{filename_base}/"
+                "remediated_html": f"s3://{bucket}/remediated/{filename_base}.html"
             }
 
         # 2) Download PDF to /tmp with sanitized filename for processing
@@ -152,14 +198,38 @@ def lambda_handler(event, context):
             print(f"[INFO] Processing PDF: {local_in}")
             
             # Process the PDF using the API with the same options as CLI
+            # conversion_result = process_pdf_accessibility(
+            #     pdf_path=local_in,
+            #     output_dir=temp_output_dir,
+            #     perform_audit=True,
+            #     perform_remediation=True,
+            #     conversion_options={
+            #         "cleanup_bda_output": True,
+            #         "single_file": True
+            #     }
+            # )
             conversion_result = process_pdf_accessibility(
-                pdf_path=local_in, 
+                pdf_path=local_in,
                 output_dir=temp_output_dir,
                 perform_audit=True,
                 perform_remediation=True,
                 conversion_options={
                     "cleanup_bda_output": True,
-                    "single_file": True
+                    "single_file": True,
+                    "continuous": True,
+                    "inline_css": True,
+                    "embed_images": True,
+                    "image_format": "png"
+                },
+                audit_options={
+                    "single_page": True,
+                    "severity_threshold": "minor",
+                    "detailed": True
+                },
+                remediation_options={
+                    "single_page": True,
+                    "auto_fix": True,
+                    "format": "html"
                 }
             )
             print(f"[INFO] Processing complete. Result: {conversion_result}")
@@ -257,74 +327,96 @@ def lambda_handler(event, context):
             else:
                 print(f"[INFO] Cleanup of intermediate files is disabled")
             
-            # Create the zip file at the end after all processing is complete
-            # This ensures all files are included in the zip
-            zip_path = f"/tmp/{filename_base}.zip"
-            
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Walk through the output directory and add files to zip
-                for root, dirs, files in os.walk(temp_output_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        # Calculate relative path to maintain directory structure
-                        rel_path = os.path.relpath(file_path, temp_output_dir)
-                        zipf.write(file_path, rel_path)
-                        print(f"[INFO] Added to zip: {rel_path}")
-            
-            # Upload zip to the output folder so head_object can detect it
-            # This MUST match the path we check in the idempotency check above
-            output_s3_key = f"output/{filename_base}.zip"
-            s3.upload_file(zip_path, bucket, output_s3_key)
-            print(f"[INFO] Uploaded complete zip file to s3://{bucket}/{output_s3_key}")
-            
-            # Create a separate "final" zip for the remediated folder with only specific files
-            final_zip_path = f"/tmp/final_{filename_base}.zip"
-            
-            # List of files/folders to include in the final zip
-            include_patterns = [
-                "remediated_html/",
-                "usage_data.json",
-                "remediation_report.html"
-            ]
-            
-            with zipfile.ZipFile(final_zip_path, 'w', zipfile.ZIP_DEFLATED) as final_zipf:
-                # Walk through the output directory and add only specific files to zip
-                for root, dirs, files in os.walk(temp_output_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        # Calculate relative path to maintain directory structure
-                        rel_path = os.path.relpath(file_path, temp_output_dir)
-                        
-                        # Check if this file should be included
-                        should_include = False
-                        for pattern in include_patterns:
-                            if pattern.lower() in rel_path.lower():
-                                should_include = True
-                                break
-                        
-                        if should_include:
-                            final_zipf.write(file_path, rel_path)
-                            print(f"[INFO] Added to final zip: {rel_path}")
-            
-            # Upload the final zip to the remediated folder
-            remediated_s3_key = f"remediated/final_{filename_base}.zip"
-            s3.upload_file(final_zip_path, bucket, remediated_s3_key)
-            print(f"[INFO] Uploaded final zip file to s3://{bucket}/{remediated_s3_key}")
-                
-        except Exception as e:
-            print(f"[ERROR] Creating or uploading zip failed: {e}")
-            print(traceback.format_exc())
-            return {"status": "error", "message": f"Zip creation or upload failed: {e}"}
+            # # Create the zip file at the end after all processing is complete
+            # # This ensures all files are included in the zip
+            # zip_path = f"/tmp/{filename_base}.zip"
+            #
+            # with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            #     # Walk through the output directory and add files to zip
+            #     for root, dirs, files in os.walk(temp_output_dir):
+            #         for file in files:
+            #             file_path = os.path.join(root, file)
+            #             # Calculate relative path to maintain directory structure
+            #             rel_path = os.path.relpath(file_path, temp_output_dir)
+            #             zipf.write(file_path, rel_path)
+            #             print(f"[INFO] Added to zip: {rel_path}")
+            #
+            # # Upload zip to the output folder so head_object can detect it
+            # # This MUST match the path we check in the idempotency check above
+            # output_s3_key = f"output/{filename_base}.zip"
+            # s3.upload_file(zip_path, bucket, output_s3_key)
+            # print(f"[INFO] Uploaded complete zip file to s3://{bucket}/{output_s3_key}")
+            #
+            # # Create a separate "final" zip for the remediated folder with only specific files
+            # final_zip_path = f"/tmp/final_{filename_base}.zip"
+            #
+            # # List of files/folders to include in the final zip
+            # include_patterns = [
+            #     "remediated_html/",
+            #     "usage_data.json",
+            #     "remediation_report.html"
+            # ]
+            #
+            # with zipfile.ZipFile(final_zip_path, 'w', zipfile.ZIP_DEFLATED) as final_zipf:
+            #     # Walk through the output directory and add only specific files to zip
+            #     for root, dirs, files in os.walk(temp_output_dir):
+            #         for file in files:
+            #             file_path = os.path.join(root, file)
+            #             # Calculate relative path to maintain directory structure
+            #             rel_path = os.path.relpath(file_path, temp_output_dir)
+            #
+            #             # Check if this file should be included
+            #             should_include = False
+            #             for pattern in include_patterns:
+            #                 if pattern.lower() in rel_path.lower():
+            #                     should_include = True
+            #                     break
+            #
+            #             if should_include:
+            #                 final_zipf.write(file_path, rel_path)
+            #                 print(f"[INFO] Added to final zip: {rel_path}")
+            #
+            # # Upload the final zip to the remediated folder
+            # remediated_s3_key = f"remediated/final_{filename_base}.zip"
+            # s3.upload_file(final_zip_path, bucket, remediated_s3_key)
+            # print(f"[INFO] Uploaded final zip file to s3://{bucket}/{remediated_s3_key}")
+            # Upload one self-contained HTML file as the final deliverable.
+            final_html_path = find_final_html(temp_output_dir, conversion_result)
 
+            remediated_s3_key = f"remediated/{filename_base}.html"
+
+            s3.upload_file(
+                final_html_path,
+                bucket,
+                remediated_s3_key,
+                ExtraArgs={
+                    "ContentType": "text/html; charset=utf-8"
+                }
+            )
+
+            print(f"[INFO] Uploaded final self-contained HTML to s3://{bucket}/{remediated_s3_key}")
+        except Exception as e:
+            print(f"[ERROR] Creating or uploading HTML failed: {e}")
+            print(traceback.format_exc())
+            return {"status": "error", "message": f"HTML creation or upload failed: {e}"}
+
+        # return {
+        #     "status": "done",
+        #     "execution_id": context.aws_request_id,
+        #     "input": f"s3://{bucket}/{key}",
+        #     "original_filename": original_filename,
+        #     "sanitized_filename": sanitized_filename,
+        #     "output_dir": f"s3://{bucket}/output/",
+        #     "output_zip": f"s3://{bucket}/output/{filename_base}.zip",
+        #     "remediated_zip": f"s3://{bucket}/remediated/final_{filename_base}.zip"
+        # }
         return {
             "status": "done",
             "execution_id": context.aws_request_id,
             "input": f"s3://{bucket}/{key}",
             "original_filename": original_filename,
             "sanitized_filename": sanitized_filename,
-            "output_dir": f"s3://{bucket}/output/",
-            "output_zip": f"s3://{bucket}/output/{filename_base}.zip",
-            "remediated_zip": f"s3://{bucket}/remediated/final_{filename_base}.zip"
+            "remediated_html": f"s3://{bucket}/{remediated_s3_key}"
         }
     except Exception as e:
         print(f"[ERROR] Unhandled exception: {e}")
