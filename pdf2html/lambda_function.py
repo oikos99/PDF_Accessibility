@@ -238,26 +238,26 @@ def lambda_handler(event, context):
             print(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
-        # 4) Create a zip file with all output files (like the CLI does)
+        # 4) Clean up intermediate files and upload one self-contained HTML file
         try:
-            # Upload only the index.html file for compatibility with existing code
-            index_html_path = os.path.join(temp_output_dir, "index.html")
-            if not os.path.exists(index_html_path):
-                # If not found directly, look for it in subdirectories
-                for root, _, files in os.walk(temp_output_dir):
-                    for file in files:
-                        if file == "index.html":
-                            index_html_path = os.path.join(root, file)
-                            break
-                    if os.path.exists(index_html_path):
-                        break
-            
-            if os.path.exists(index_html_path):
-                index_s3_key = f"output/{filename_base}.html"
-                s3.upload_file(index_html_path, bucket, index_s3_key)
-                print(f"[INFO] Uploaded index.html to s3://{bucket}/{index_s3_key}")
-            else:
-                print(f"[WARNING] No index.html found in output directory")
+            # # Upload only the index.html file for compatibility with existing code
+            # index_html_path = os.path.join(temp_output_dir, "index.html")
+            # if not os.path.exists(index_html_path):
+            #     # If not found directly, look for it in subdirectories
+            #     for root, _, files in os.walk(temp_output_dir):
+            #         for file in files:
+            #             if file == "index.html":
+            #                 index_html_path = os.path.join(root, file)
+            #                 break
+            #         if os.path.exists(index_html_path):
+            #             break
+            #
+            # if os.path.exists(index_html_path):
+            #     index_s3_key = f"output/{filename_base}.html"
+            #     s3.upload_file(index_html_path, bucket, index_s3_key)
+            #     print(f"[INFO] Uploaded index.html to s3://{bucket}/{index_s3_key}")
+            # else:
+            #     print(f"[WARNING] No index.html found in output directory")
                 
             # 5) Clean up Bedrock intermediate files
             # Check if cleanup is enabled via environment variable
