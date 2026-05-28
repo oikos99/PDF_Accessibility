@@ -436,10 +436,30 @@ def lambda_handler(event, context):
             # s3.upload_file(final_zip_path, bucket, remediated_s3_key)
             # print(f"[INFO] Uploaded final zip file to s3://{bucket}/{remediated_s3_key}")
             # Upload one self-contained HTML file as the final deliverable.
+            # final_html_path = find_final_html(temp_output_dir, conversion_result)
+            #
+            # remediated_s3_key = f"remediated/{filename_base}.html"
+            #
+            # s3.upload_file(
+            #     final_html_path,
+            #     bucket,
+            #     remediated_s3_key,
+            #     ExtraArgs={
+            #         "ContentType": "text/html; charset=utf-8"
+            #     }
+            # )
             final_html_path = find_final_html(temp_output_dir, conversion_result)
 
-            remediated_s3_key = f"remediated/{filename_base}.html"
+            # Force the final HTML to be self-contained before uploading it.
+            final_html_path = embed_local_images_as_base64(
+                final_html_path,
+                search_roots=[
+                    temp_output_dir,
+                    os.path.dirname(final_html_path),
+                ],
+            )
 
+            remediated_s3_key = f"remediated/{filename_base}.html"
             s3.upload_file(
                 final_html_path,
                 bucket,
@@ -448,6 +468,7 @@ def lambda_handler(event, context):
                     "ContentType": "text/html; charset=utf-8"
                 }
             )
+
 
             print(f"[INFO] Uploaded final self-contained HTML to s3://{bucket}/{remediated_s3_key}")
         except Exception as e:
