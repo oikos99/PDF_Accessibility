@@ -49,43 +49,74 @@ def sanitize_filename(filename):
 def find_final_html(output_dir, conversion_result=None):
     """
     Find the best final HTML file to upload as the single deliverable.
-    Prefer the remediated single-page output, then fall back to other HTML files.
-    """
 
-    # First try the remediation result path returned by the pipeline.
+    Prefer the HTML file that preserves page-level navigation and page containers.
+    This avoids selecting remediated_combined_document.html when it collapses the
+    document into one page-container and loses the page links.
+    """
+    from bs4 import BeautifulSoup
+
+    candidates = []
+
+    # Include the remediation result path returned by the pipeline, but do not
+    # blindly trust it. Score it against other HTML files.
     if conversion_result:
         remediation_result = conversion_result.get("remediation_result", {})
         output_path = remediation_result.get("output_path")
-
         if output_path and os.path.isfile(output_path):
-            return output_path
+            candidates.append(output_path)
 
-    preferred_filenames = [
-        "remediated_combined_document.html",
-        "remediated.html",
-        "index.html",
-        "result.html",
-        "combined_document.html"
-    ]
-
-    for preferred in preferred_filenames:
-        for root, _, files in os.walk(output_dir):
-            if preferred in files:
-                return os.path.join(root, preferred)
-
-    # Final fallback: any HTML file with "remediated" in the filename.
-    for root, _, files in os.walk(output_dir):
-        for file in files:
-            if file.lower().endswith(".html") and "remediated" in file.lower():
-                return os.path.join(root, file)
-
-    # Last resort: any HTML file.
     for root, _, files in os.walk(output_dir):
         for file in files:
             if file.lower().endswith(".html"):
-                return os.path.join(root, file)
+                candidates.append(os.path.join(root, file))
 
-    raise FileNotFoundError("No HTML output file found.")
+    # Deduplicate while preserving order.
+    candidates = list(dict.fromkeys(candidates))
+
+    if not candidates:
+        raise FileNotFoundError("No HTML output file found.")
+
+    def score_html(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                soup = BeautifulSoup(f.read(), "html.parser")
+
+            page_count = len(soup.select('[id^="page-"]'))
+            nav_link_count = len(soup.select('nav a[href^="#page-"]'))
+            empty_nav_penalty = 1 if soup.select_one("nav ul") and not soup.select("nav a") else 0
+
+            filename = os.path.basename(path).lower()
+
+            filename_bonus = 0
+            if filename == "remediated.html":
+                filename_bonus = 50
+            elif filename == "index.html":
+                filename_bonus = 20
+            elif filename == "result.html":
+                filename_bonus = 10
+            elif filename == "remediated_combined_document.html":
+                filename_bonus = -50
+
+            return (
+                page_count * 10
+                + nav_link_count * 20
+                + filename_bonus
+                - empty_nav_penalty * 100
+            )
+
+        except Exception as e:
+            print(f"[WARN] Could not score HTML candidate {path}: {e}")
+            return -9999
+
+    best = max(candidates, key=score_html)
+
+    print("[INFO] HTML candidates:")
+    for candidate in candidates:
+        print(f"[INFO]   score={score_html(candidate)} path={candidate}")
+
+    print(f"[INFO] Selected final HTML: {best}")
+    return best
 
 
 def embed_local_images_as_base64(html_path, search_roots):
