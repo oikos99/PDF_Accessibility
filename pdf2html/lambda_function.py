@@ -7,6 +7,11 @@ import tempfile
 import shutil
 import urllib.parse
 from content_accessibility_utility_on_aws.api import process_pdf_accessibility
+import base64
+import mimetypes
+from pathlib import Path
+from bs4 import BeautifulSoup
+
 
 s3 = boto3.client("s3")
 
@@ -81,6 +86,56 @@ def find_final_html(output_dir, conversion_result=None):
                 return os.path.join(root, file)
 
     raise FileNotFoundError("No HTML output file found.")
+
+
+def embed_local_images_as_base64(html_path, search_roots):
+    """
+    Replace local <img src="./images/file.png"> references with base64 data URIs.
+    This makes the final HTML self-contained.
+    """
+    html_path = Path(html_path)
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+
+    for img in soup.find_all("img"):
+        src = img.get("src")
+        if not src:
+            continue
+
+        # Already embedded or remote.
+        if src.startswith(("data:", "http://", "https://")):
+            continue
+
+        clean_src = src.split("#", 1)[0].split("?", 1)[0]
+        clean_src = urllib.parse.unquote(clean_src)
+
+        candidates = []
+
+        # Normal relative path from the HTML file.
+        candidates.append((html_path.parent / clean_src).resolve())
+
+        # Try against known output roots.
+        for root in search_roots:
+            root = Path(root)
+            candidates.append((root / clean_src).resolve())
+            candidates.append((root / "extracted_html" / clean_src).resolve())
+            candidates.append((root / "extracted_html" / "images" / Path(clean_src).name).resolve())
+            candidates.append((root / "images" / Path(clean_src).name).resolve())
+
+        image_path = next((p for p in candidates if p.exists() and p.is_file()), None)
+
+        if not image_path:
+            print(f"[WARN] Could not find image for src={src}")
+            continue
+
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        img["src"] = f"data:{mime_type};base64,{encoded}"
+
+        print(f"[INFO] Embedded image as base64: {src} -> {image_path}")
+
+    html_path.write_text(str(soup), encoding="utf-8")
+    return str(html_path)
+
 
 def lambda_handler(event, context):
     """
