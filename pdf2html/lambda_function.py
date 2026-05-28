@@ -12,7 +12,7 @@ import mimetypes
 from pathlib import Path
 from bs4 import BeautifulSoup
 
-
+DEPLOY_MARKER = "IMAGE_EMBED_FIX_V3_20260528"
 s3 = boto3.client("s3")
 
 def sanitize_filename(filename):
@@ -138,6 +138,7 @@ def embed_local_images_as_base64(html_path, search_roots):
 
 
 def lambda_handler(event, context):
+    print(f"[DEPLOY_MARKER] {DEPLOY_MARKER}")
     """
     Lambda handler for processing PDF files uploaded to S3.
     
@@ -450,7 +451,7 @@ def lambda_handler(event, context):
             # )
             final_html_path = find_final_html(temp_output_dir, conversion_result)
 
-            # Force the final HTML to be self-contained before uploading it.
+            # Optional: your base64 image embedding fix
             final_html_path = embed_local_images_as_base64(
                 final_html_path,
                 search_roots=[
@@ -459,7 +460,21 @@ def lambda_handler(event, context):
                 ],
             )
 
+            # PUT THE MARKER CODE HERE
+            with open(final_html_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+
+            html_content = html_content.replace(
+                "<html",
+                f"<!-- {DEPLOY_MARKER} --><html",
+                1
+            )
+
+            with open(final_html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+
             remediated_s3_key = f"remediated/{filename_base}.html"
+
             s3.upload_file(
                 final_html_path,
                 bucket,
