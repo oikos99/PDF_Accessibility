@@ -287,6 +287,69 @@ def enhance_page_navigation_labels(html_path):
     return str(html_path)
 
 
+def add_page_markers(html_path):
+    """
+    Ensure every page section starts with a visible Page X marker.
+
+    This does not change heading levels. It adds a non-heading page boundary
+    marker at the start of each div whose id begins with "page-".
+    """
+    html_path = Path(html_path)
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+
+    pages = soup.select('div[id^="page-"]')
+
+    if not pages:
+        print("[WARN] No page sections found for page markers")
+        return str(html_path)
+
+    # Add simple styling if it does not already exist.
+    head = soup.find("head")
+    if head and not soup.find("style", attrs={"data-page-marker-style": "true"}):
+        style = soup.new_tag("style")
+        style["data-page-marker-style"] = "true"
+        style.string = """
+        .page-marker {
+            font-weight: bold;
+            margin-top: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        """
+        head.append(style)
+
+    for index, page in enumerate(pages, start=1):
+        page_label = f"Page {index}"
+
+        # If this page already starts with our page marker, update it and move on.
+        first_element = next(
+            (child for child in page.children if getattr(child, "name", None)),
+            None
+        )
+
+        if (
+            first_element
+            and first_element.name == "p"
+            and "page-marker" in first_element.get("class", [])
+        ):
+            first_element.string = page_label
+            first_element["role"] = "doc-pagebreak"
+            first_element["aria-label"] = page_label
+            continue
+
+        marker = soup.new_tag("p")
+        marker["class"] = "page-marker"
+        marker["role"] = "doc-pagebreak"
+        marker["aria-label"] = page_label
+        marker.string = page_label
+
+        page.insert(0, marker)
+
+        print(f"[INFO] Added page marker: {page_label} to #{page.get('id')}")
+
+    html_path.write_text(str(soup), encoding="utf-8")
+    return str(html_path)
+
+
 def lambda_handler(event, context):
     print(f"[DEPLOY_MARKER] {DEPLOY_MARKER}")
     """
@@ -603,6 +666,9 @@ def lambda_handler(event, context):
 
             # Improve page navigation link text.
             final_html_path = enhance_page_navigation_labels(final_html_path)
+
+            # Add visible page markers at the start of each page section.
+            final_html_path = add_page_markers(final_html_path)
 
             # Optional: your base64 image embedding fix
             final_html_path = embed_local_images_as_base64(
