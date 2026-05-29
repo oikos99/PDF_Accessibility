@@ -492,8 +492,12 @@ deploy_ui() {
     # Clone UI repository to temporary location
     UI_TEMP_DIR="/tmp/pdf-ui-deployment-$$"
     print_status "📥 Cloning UI repository..."
-    
-    if ! git clone -b main https://github.com/ASUCICREPO/PDF_accessability_UI "$UI_TEMP_DIR" 2>/dev/null; then
+
+    UI_REPO_URL="${UI_REPO_URL:-https://github.com/oikos99/PDF_accessability_UI.git}"
+    UI_BRANCH="${UI_BRANCH:-uci-single-html-output}"
+
+    if ! git clone -b "$UI_BRANCH" "$UI_REPO_URL" "$UI_TEMP_DIR" 2>/dev/null; then
+#    if ! git clone -b main https://github.com/ASUCICREPO/PDF_accessability_UI "$UI_TEMP_DIR" 2>/dev/null; then
         print_error "Failed to clone UI repository. Check internet connection and repository access."
         return 1
     fi
@@ -507,8 +511,12 @@ deploy_ui() {
     export PROJECT_NAME="${PROJECT_NAME}-ui"
     export PDF_TO_PDF_BUCKET="$pdf_to_pdf_bucket"
     export PDF_TO_HTML_BUCKET="$pdf_to_html_bucket"
-    export TARGET_BRANCH="main"
-    
+#    export TARGET_BRANCH="main"
+    export UI_REPO_URL
+    export UI_BRANCH
+    export TARGET_BRANCH="$UI_BRANCH"
+
+
     print_status "🚀 Starting UI deployment..."
     print_status "   This may take 10-15 minutes..."
     
