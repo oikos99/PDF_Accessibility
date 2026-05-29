@@ -168,6 +168,125 @@ def embed_local_images_as_base64(html_path, search_roots):
     return str(html_path)
 
 
+def enhance_page_navigation_labels(html_path):
+    """
+    Replace generic page nav links like "Page 1" with more meaningful labels:
+    "Page 1 - [first heading or first sentence]".
+    """
+    import re
+    from bs4 import BeautifulSoup
+
+    def clean_text(text):
+        text = re.sub(r"\s+", " ", text or "").strip()
+        return text
+
+    def first_sentence(text, max_len=90):
+        text = clean_text(text)
+        if not text:
+            return ""
+
+        # Prefer sentence-ending punctuation.
+        match = re.search(r"(.{20,}?[.!?])\s", text)
+        if match:
+            text = match.group(1)
+
+        # Keep link text short enough to be usable.
+        if len(text) > max_len:
+            text = text[:max_len].rsplit(" ", 1)[0] + "..."
+
+        return text
+
+    def is_bad_heading(text):
+        text = clean_text(text).lower()
+
+        if not text:
+            return True
+
+        # Skip generated page labels.
+        if re.fullmatch(r"page\s*\d+", text):
+            return True
+
+        # Skip bare page numbers.
+        if re.fullmatch(r"\d+", text):
+            return True
+
+        return False
+
+    def get_page_label(page):
+        # Find headings inside the page section.
+        headings = page.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+
+        # Highest heading level means h1 first, then h2, then h3, etc.
+        for level in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+            for heading in headings:
+                if heading.name != level:
+                    continue
+
+                text = clean_text(heading.get_text(" ", strip=True))
+
+                if not is_bad_heading(text):
+                    return first_sentence(text)
+
+        # Fallback: use the first meaningful text in the page.
+        text = clean_text(page.get_text(" ", strip=True))
+        return first_sentence(text)
+
+    html_path = Path(html_path)
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+
+    pages = soup.select('[id^="page-"]')
+
+    if not pages:
+        print("[WARN] No page sections found for navigation labeling")
+        return str(html_path)
+
+    # Find an existing nav with page links.
+    nav = soup.find("nav")
+    if nav is None:
+        nav = soup.new_tag("nav")
+        nav["aria-label"] = "Document pages"
+        ul = soup.new_tag("ul")
+        nav.append(ul)
+
+        main = soup.find("main")
+        if main:
+            main.insert_before(nav)
+        else:
+            soup.body.insert(0, nav)
+    else:
+        nav["aria-label"] = nav.get("aria-label") or "Document pages"
+        ul = nav.find("ul")
+        if ul is None:
+            ul = soup.new_tag("ul")
+            nav.append(ul)
+
+    ul = nav.find("ul")
+    ul.clear()
+
+    for index, page in enumerate(pages, start=1):
+        page_id = page.get("id")
+        if not page_id:
+            continue
+
+        label = get_page_label(page)
+
+        if label:
+            link_text = f"Page {index} - {label}"
+        else:
+            link_text = f"Page {index}"
+
+        li = soup.new_tag("li")
+        a = soup.new_tag("a", href=f"#{page_id}")
+        a.string = link_text
+        li.append(a)
+        ul.append(li)
+
+        print(f"[INFO] Page nav label: {link_text}")
+
+    html_path.write_text(str(soup), encoding="utf-8")
+    return str(html_path)
+
+
 def lambda_handler(event, context):
     print(f"[DEPLOY_MARKER] {DEPLOY_MARKER}")
     """
@@ -481,6 +600,9 @@ def lambda_handler(event, context):
             #     }
             # )
             final_html_path = find_final_html(temp_output_dir, conversion_result)
+
+            # Improve page navigation link text.
+            final_html_path = enhance_page_navigation_labels(final_html_path)
 
             # Optional: your base64 image embedding fix
             final_html_path = embed_local_images_as_base64(
