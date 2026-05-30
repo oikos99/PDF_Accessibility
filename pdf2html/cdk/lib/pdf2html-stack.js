@@ -55,16 +55,37 @@ class Pdf2HtmlStack extends Stack {
     }));
 
     // Add permissions for Bedrock - scoped to specific actions needed
+    // lambdaRole.addToPolicy(new iam.PolicyStatement({
+    //   actions: [
+    //     'bedrock:InvokeModel',
+    //     'bedrock:InvokeModelWithResponseStream',
+    //   ],
+    //   resources: [
+    //     `arn:aws:bedrock:${this.region}::foundation-model/us.amazon.nova-lite-v1:0`,
+    //     `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-lite-v1:0`,
+    //     `arn:aws:bedrock:${this.region}::foundation-model/us.amazon.nova-pro-v1:0`,
+    //     `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-pro-v1:0`,
+    //   ],
+    // }));
+    // Allow AI-generated alt text through the US Nova Lite cross-Region
+    // inference profile and its underlying foundation models.
     lambdaRole.addToPolicy(new iam.PolicyStatement({
       actions: [
         'bedrock:InvokeModel',
         'bedrock:InvokeModelWithResponseStream',
       ],
       resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/us.amazon.nova-lite-v1:0`,
-        `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-lite-v1:0`,
-        `arn:aws:bedrock:${this.region}::foundation-model/us.amazon.nova-pro-v1:0`,
-        `arn:aws:bedrock:${this.region}::foundation-model/amazon.nova-pro-v1:0`,
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.amazon.nova-lite-v1:0`,
+        `arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0`,
+      ],
+    }));
+
+    lambdaRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'bedrock:GetInferenceProfile',
+      ],
+      resources: [
+        `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.amazon.nova-lite-v1:0`,
       ],
     }));
     
