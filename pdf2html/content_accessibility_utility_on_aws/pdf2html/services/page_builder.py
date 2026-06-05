@@ -15,6 +15,11 @@ from bs4 import BeautifulSoup
 from typing import Dict, List, Any
 import hashlib
 
+from content_accessibility_utility_on_aws.postprocess.final_images import (
+    apply_relative_image_widths,
+)
+
+
 # Set up module-level logger
 logger = logging.getLogger(__name__)
 
@@ -250,6 +255,13 @@ def build_html_data(
     for i in range(num_pages):
         # Build the page HTML
         page_html = result_data["pages"][i].get("representation", {}).get("html", "")
+
+        page_html = apply_relative_image_widths(
+            page_html=page_html,
+            result_data=result_data,
+            page_index=i,
+        )
+
         if not page_html:
             logger.warning(f"Page {i+1} has no HTML representation")
             continue
