@@ -99,10 +99,13 @@ def _page_width_pixels(
     output_dir: str,
 ) -> Optional[int]:
     """
-    Determine the width of a rectified source-page image.
+    Determine the width of the rectified source-page image.
 
-    Prefer the BDA metadata value. If it is absent, locate and inspect the
-    rectified page image downloaded with the BDA output.
+    Priority:
+    1. Use BDA page-width metadata when available.
+    2. Use the rectified-image path from BDA metadata when available.
+    3. Fall back to the predictable local filename:
+       rectified_image_<page_index>.png
     """
     pages = result_data.get("pages") or []
 
@@ -111,7 +114,6 @@ def _page_width_pixels(
             "Page index %s is outside the BDA pages array",
             page_index,
         )
-
         return None
 
     page = pages[page_index]
@@ -129,31 +131,46 @@ def _page_width_pixels(
     if metadata_width and metadata_width > 0:
         return metadata_width
 
-    rectified_image = asset_metadata.get("rectified_image", "")
+    candidate_paths = []
 
-    if not rectified_image:
-        logger.warning(
-            "No rectified page-image width metadata found for page %s",
-            page_index + 1,
-        )
-
-        return None
-
-    local_page_image = _find_local_file(
-        output_dir=output_dir,
-        path_or_uri=rectified_image,
+    metadata_rectified_image = asset_metadata.get(
+        "rectified_image",
+        "",
     )
 
-    if not local_page_image:
-        logger.warning(
-            "Could not locate rectified page image for page %s: %s",
-            page_index + 1,
-            rectified_image,
+    if metadata_rectified_image:
+        candidate_paths.append(metadata_rectified_image)
+
+    # BDA downloads this file even when the metadata path is absent.
+    candidate_paths.append(
+        f"rectified_image_{page_index}.png"
+    )
+
+    for candidate_path in candidate_paths:
+        local_page_image = _find_local_file(
+            output_dir=output_dir,
+            path_or_uri=candidate_path,
         )
 
-        return None
+        if not local_page_image:
+            continue
 
-    return _image_width_pixels(local_page_image)
+        page_width = _image_width_pixels(local_page_image)
+
+        if page_width:
+            logger.info(
+                "Using rectified page image for relative sizing: %s",
+                local_page_image,
+            )
+            return page_width
+
+    logger.warning(
+        "Could not locate rectified page image for page %s; tried: %s",
+        page_index + 1,
+        candidate_paths,
+    )
+
+    return None
 
 
 def _get_bounding_box_entries(
