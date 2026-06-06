@@ -102,21 +102,18 @@ def _page_width_pixels(
     Determine the width of the rectified source-page image.
 
     Priority:
-    1. Use BDA page-width metadata when available.
+    1. Use BDA width metadata when available.
     2. Use the rectified-image path from BDA metadata when available.
-    3. Fall back to the predictable local filename:
-       rectified_image_<page_index>.png
+    3. Fall back to rectified_image_<page_index>.png.
     """
     pages = result_data.get("pages") or []
 
-    if page_index >= len(pages):
-        logger.warning(
-            "Page index %s is outside the BDA pages array",
-            page_index,
-        )
-        return None
+    page = (
+        pages[page_index]
+        if page_index < len(pages)
+        else {}
+    )
 
-    page = pages[page_index]
     asset_metadata = page.get("asset_metadata") or {}
 
     metadata_width = asset_metadata.get(
@@ -141,7 +138,6 @@ def _page_width_pixels(
     if metadata_rectified_image:
         candidate_paths.append(metadata_rectified_image)
 
-    # BDA downloads this file even when the metadata path is absent.
     candidate_paths.append(
         f"rectified_image_{page_index}.png"
     )
@@ -162,6 +158,7 @@ def _page_width_pixels(
                 "Using rectified page image for relative sizing: %s",
                 local_page_image,
             )
+
             return page_width
 
     logger.warning(
