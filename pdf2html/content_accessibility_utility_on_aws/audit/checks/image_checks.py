@@ -64,6 +64,14 @@ class AltTextCheck(AccessibilityCheck):
                             description="Image has empty alt text but is not marked as decorative",
                             status="needs_remediation",
                         )
+                # elif alt_text.lower() in [
+                #     "image",
+                #     "diagram",
+                #     "photo",
+                #     "picture",
+                #     "graphic",
+                #     "icon",
+                # ]:
                 elif alt_text.lower() in [
                     "image",
                     "diagram",
@@ -71,6 +79,11 @@ class AltTextCheck(AccessibilityCheck):
                     "picture",
                     "graphic",
                     "icon",
+                    "logo",
+                    "chart",
+                    "graph",
+                    "figure",
+                    "illustration",
                 ]:
                     self.add_issue(
                         "generic-alt-text",

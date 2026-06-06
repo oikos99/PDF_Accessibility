@@ -90,16 +90,21 @@ def copy_missing_images(html_file, output_dir, html_output_dir):
                 copied_count += 1
             except Exception as e:
                 logger.warning(f"Failed to copy image {src_file}: {e}")
+        # else:
+        #     # Try to find a similar image
+        #     for img_name, img_path in all_images.items():
+        #         try:
+        #             shutil.copy2(img_path, dest_file)
+        #             logger.debug(f"Copied alternative image: {img_path} -> {dest_file}")
+        #             copied_count += 1
+        #             break
+        #         except Exception as e:
+        #             logger.warning(f"Failed to copy alternative image: {e}")
         else:
-            # Try to find a similar image
-            for img_name, img_path in all_images.items():
-                try:
-                    shutil.copy2(img_path, dest_file)
-                    logger.debug(f"Copied alternative image: {img_path} -> {dest_file}")
-                    copied_count += 1
-                    break
-                except Exception as e:
-                    logger.warning(f"Failed to copy alternative image: {e}")
+            logger.warning(
+                "Referenced image was not found; leaving it unresolved: %s",
+                src_filename,
+            )
 
     return copied_count
 

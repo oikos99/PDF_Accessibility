@@ -16,7 +16,7 @@ from content_accessibility_utility_on_aws.postprocess.final_images import (
 )
 
 
-DEPLOY_MARKER = "IMAGE_EMBED_FIX_V3_20260528"
+DEPLOY_MARKER = "FINAL_IMAGE_PROCESSING_V1_20260605"
 s3 = boto3.client("s3")
 
 def sanitize_filename(filename):
