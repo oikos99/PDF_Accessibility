@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup
 from content_accessibility_utility_on_aws.postprocess.final_images import (
     process_final_html_images,
 )
+from content_accessibility_utility_on_aws.postprocess.html_hygiene import (
+    apply_html_hygiene,
+)
 
 
 DEPLOY_MARKER = "FINAL_IMAGE_PROCESSING_V1_20260605"
@@ -673,6 +676,12 @@ def lambda_handler(event, context):
 
             # Add visible page markers at the start of each page section.
             final_html_path = add_page_markers(final_html_path)
+
+            # Add the main landmark, skip link, and predominant page language.
+            final_html_path = apply_html_hygiene(
+                final_html_path
+            )
+
 
             # # # Optional: your base64 image embedding fix
             # # final_html_path = embed_local_images_as_base64(
