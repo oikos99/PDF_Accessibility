@@ -17,9 +17,13 @@ from content_accessibility_utility_on_aws.postprocess.final_images import (
 from content_accessibility_utility_on_aws.postprocess.html_hygiene import (
     apply_html_hygiene,
 )
+from content_accessibility_utility_on_aws.postprocess.structure import (
+    finish_structure_analysis,
+    start_structure_analysis,
+)
 
 
-DEPLOY_MARKER = "FINAL_IMAGE_PROCESSING_V1_20260605"
+DEPLOY_MARKER = "TEXTRACT_REPORT_ONLY_V1_20260606"
 s3 = boto3.client("s3")
 
 def sanitize_filename(filename):
@@ -371,6 +375,7 @@ def lambda_handler(event, context):
     """
     # Create a variable to track the temporary directory for cleanup in finally block
     temp_output_dir = None
+    structure_job = None
     
     try:
         # 1) Extract bucket/key from the S3 event
@@ -388,7 +393,14 @@ def lambda_handler(event, context):
         record = event["Records"][0]["s3"]
         bucket = record["bucket"]["name"]
         key = record["object"]["key"]
-        
+        object_etag = (
+            record["object"].get(
+                "eTag",
+                "",
+            )
+        )
+
+
         # URL decode the key to handle URL-encoded characters (like spaces)
         key = urllib.parse.unquote_plus(key)
         
@@ -455,6 +467,16 @@ def lambda_handler(event, context):
                 "remediated_html": f"s3://{bucket}/remediated/{filename_base}.html"
             }
 
+        # Start optional Textract structural analysis early so it can run
+        # while the existing BDA conversion continues.
+        structure_job = start_structure_analysis(
+            bucket=bucket,
+            key=key,
+            filename_base=filename_base,
+            object_etag=object_etag,
+        )
+
+
         # 2) Download PDF to /tmp with sanitized filename for processing
         local_in = f"/tmp/{sanitized_filename}"
         try:
@@ -513,6 +535,19 @@ def lambda_handler(event, context):
             print(f"[ERROR] Processing {key} failed: {e}")
             print(traceback.format_exc())
             return {"status": "error", "message": str(e)}
+
+        # Retrieve optional Textract diagnostics.
+        # This sprint is report-only and does not modify the HTML.
+        structure_report = finish_structure_analysis(
+            job=structure_job,
+            lambda_context=context,
+        )
+
+        if structure_report:
+            print(
+                "[INFO] Textract structure report status: "
+                f"{structure_report.get('result_status')}"
+            )
 
         # 4) Clean up intermediate files and upload one self-contained HTML file
         try:

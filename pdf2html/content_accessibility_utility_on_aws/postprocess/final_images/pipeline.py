@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple, Union
 
 from bs4 import BeautifulSoup
-
+from ..config import PostprocessSettings
 from .classifier import NovaImageClassifier
 from .html_actions import (
     apply_analysis,
@@ -18,6 +18,8 @@ from .resolver import (
     resolve_local_image_path,
 )
 from .sizing import apply_final_html_pixel_widths
+
+
 
 
 PathLike = Union[str, Path]
@@ -78,6 +80,12 @@ def process_final_html_images(
     html_path = Path(html_path)
     search_roots = list(search_roots)
 
+    settings = PostprocessSettings.from_env()
+
+    nova_image_enabled = (
+        settings.nova_image_enabled
+    )
+
     model_id = os.environ.get(
         "IMAGE_ANALYSIS_MODEL_ID",
         "us.amazon.nova-lite-v1:0",
@@ -105,7 +113,20 @@ def process_final_html_images(
         search_roots=search_roots,
     )
 
-    classifier = NovaImageClassifier(model_id=model_id)
+    #classifier = NovaImageClassifier(model_id=model_id)
+    classifier = (
+        NovaImageClassifier(
+            model_id=model_id
+        )
+        if nova_image_enabled
+        else None
+    )
+
+    if classifier is None:
+        print(
+            "[INFO] Nova image analysis is disabled; "
+            "retaining images without AI classification"
+        )
     report_items: List[Dict[str, Any]] = []
 
     for image_index, img in enumerate(
@@ -133,6 +154,33 @@ def process_final_html_images(
                     "confidence": 0.0,
                     "action": "kept-path-unresolved",
                     "review_required": True,
+                }
+            )
+
+            continue
+
+
+        if classifier is None:
+            img["data-accessibility-review"] = (
+                "required"
+            )
+
+            report_items.append(
+                {
+                    "image_index": image_index,
+                    "src": src,
+                    "existing_alt": existing_alt,
+                    "classification": (
+                        "NOT_ANALYZED"
+                    ),
+                    "confidence": 0.0,
+                    "action": (
+                        "kept-nova-disabled"
+                    ),
+                    "review_required": True,
+                    "nova_image_analysis_enabled": (
+                        False
+                    ),
                 }
             )
 

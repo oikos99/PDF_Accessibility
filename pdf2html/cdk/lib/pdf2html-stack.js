@@ -54,6 +54,17 @@ class Pdf2HtmlStack extends Stack {
       resources: [`arn:aws:s3:::${bucketName.valueAsString}`, `arn:aws:s3:::${bucketName.valueAsString}/*`],
     }));
 
+    // Optional Textract structure diagnostics.
+    // Textract StartDocumentAnalysis and GetDocumentAnalysis do not
+    // support resource-level IAM scoping, so resources must be "*".
+    lambdaRole.addToPolicy(new iam.PolicyStatement({
+     actions: [
+      'textract:StartDocumentAnalysis',
+      'textract:GetDocumentAnalysis',
+     ],
+     resources: ['*'],
+    }));
+
     // Add permissions for Bedrock - scoped to specific actions needed
     // lambdaRole.addToPolicy(new iam.PolicyStatement({
     //   actions: [
@@ -135,11 +146,35 @@ class Pdf2HtmlStack extends Stack {
       role: lambdaRole,
       timeout: Duration.minutes(15),
       memorySize: 1024,
+      // environment: {
+      //   BDA_PROJECT_ARN: bdaProjectArn.valueAsString,
+      //   BDA_S3_BUCKET: bucketName.valueAsString,
+      //   BDA_OUTPUT_PREFIX: 'bda-processing',  // Use the new prefix for BDA output
+      //   CLEANUP_INTERMEDIATE_FILES: 'true'    // Enable cleanup of intermediate files
+      // },
       environment: {
-        BDA_PROJECT_ARN: bdaProjectArn.valueAsString,
-        BDA_S3_BUCKET: bucketName.valueAsString,
-        BDA_OUTPUT_PREFIX: 'bda-processing',  // Use the new prefix for BDA output
-        CLEANUP_INTERMEDIATE_FILES: 'true'    // Enable cleanup of intermediate files
+       BDA_PROJECT_ARN: bdaProjectArn.valueAsString,
+       BDA_S3_BUCKET: bucketName.valueAsString,
+       BDA_OUTPUT_PREFIX: 'bda-processing',
+       CLEANUP_INTERMEDIATE_FILES: 'true',
+
+       // Optional structural-analysis layer.
+       TEXTRACT_STRUCTURE_ENABLED: 'true',
+       STRUCTURE_APPLY_HTML_CHANGES_ENABLED: 'false',
+       TEXTRACT_MAX_WAIT_SECONDS: '120',
+       TEXTRACT_POLL_INTERVAL_SECONDS: '3',
+       TEXTRACT_LAMBDA_RESERVE_SECONDS: '45',
+       STRUCTURE_DIAGNOSTICS_PREFIX: 'diagnostics',
+
+       // Master and layer-specific Nova switches.
+       NOVA_AI_ENABLED: 'true',
+       NOVA_IMAGE_ANALYSIS_ENABLED: 'true',
+       NOVA_STRUCTURE_ADJUDICATION_ENABLED: 'false',
+
+       // Existing Nova Lite image-classification defaults.
+       IMAGE_ANALYSIS_MODEL_ID: 'us.amazon.nova-lite-v1:0',
+       DECORATIVE_AUTO_REMOVE_THRESHOLD: '0.98',
+       THEMATIC_BREAK_THRESHOLD: '0.95',
       },
     });
 
