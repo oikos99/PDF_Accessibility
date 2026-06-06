@@ -256,11 +256,18 @@ def build_html_data(
         # Build the page HTML
         page_html = result_data["pages"][i].get("representation", {}).get("html", "")
 
+        # page_html = apply_relative_image_widths(
+        #     page_html=page_html,
+        #     result_data=result_data,
+        #     page_index=i,
+        # )
         page_html = apply_relative_image_widths(
             page_html=page_html,
             result_data=result_data,
             page_index=i,
+            output_dir=output_dir,
         )
+
 
         if not page_html:
             logger.warning(f"Page {i+1} has no HTML representation")
