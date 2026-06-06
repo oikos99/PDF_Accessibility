@@ -59,6 +59,16 @@ Rules:
 - Use THEMATIC_BREAK when a divider conveys meaningful structure.
 - Return only valid JSON.
 - Do not use Markdown fences.
+- Unless the classification is DECORATIVE, REDUNDANT, or THEMATIC_BREAK,
+  always provide a non-empty alt_text.
+- If the classification is UNCERTAIN, still provide a conservative
+  best-effort alt_text describing only directly visible features.
+- For an uncertain diagram, describe visible shapes, labels, shading,
+  and spatial relationships. Do not invent the diagram's meaning.
+- Keep the classification as UNCERTAIN and use a low confidence score
+  when the interpretation requires human review.
+- For a complex or uncertain technical figure, provide a
+  long_description when the visible relationships can be described.
 
 Existing alternative text:
 {json.dumps(context.get("existing_alt", ""))}
