@@ -17,6 +17,7 @@ from .resolver import (
     embed_local_images_as_base64,
     resolve_local_image_path,
 )
+from .sizing import apply_final_html_pixel_widths
 
 
 PathLike = Union[str, Path]
@@ -98,6 +99,11 @@ def process_final_html_images(
     )
 
     _ensure_styles(soup)
+
+    apply_final_html_pixel_widths(
+        soup=soup,
+        search_roots=search_roots,
+    )
 
     classifier = NovaImageClassifier(model_id=model_id)
     report_items: List[Dict[str, Any]] = []

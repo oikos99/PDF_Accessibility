@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
@@ -439,3 +439,144 @@ def apply_relative_image_widths(
         )
 
     return str(soup)
+
+
+def _find_local_file_in_roots(
+    search_roots: Iterable[str],
+    path_or_uri: str,
+) -> Optional[Path]:
+    """Find a file by exact filename within the permitted search roots."""
+    for root in search_roots:
+        local_file = _find_local_file(
+            output_dir=str(root),
+            path_or_uri=path_or_uri,
+        )
+
+        if local_file:
+            return local_file
+
+    return None
+
+
+def _page_index_from_img(img_tag) -> Optional[int]:
+    """
+    Find the zero-based page index from an ancestor such as:
+    <div class="page" id="page-0">
+    """
+    current = img_tag
+
+    while current is not None:
+        page_id = (
+            current.get("id", "")
+            if hasattr(current, "get")
+            else ""
+        )
+
+        if (
+            isinstance(page_id, str)
+            and page_id.startswith("page-")
+        ):
+            try:
+                return int(page_id.removeprefix("page-"))
+            except ValueError:
+                return None
+
+        current = getattr(current, "parent", None)
+
+    return None
+
+
+def apply_final_html_pixel_widths(
+    soup: BeautifulSoup,
+    search_roots: Iterable[str],
+) -> None:
+    """
+    Apply relative image widths to the final patron-facing HTML.
+
+    This runs immediately before base64 embedding. It calculates:
+
+        extracted crop width
+        --------------------  × 100
+        rectified page width
+    """
+    roots = [str(Path(root)) for root in search_roots]
+
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src", "")
+
+        if not src:
+            continue
+
+        if src.startswith(("data:", "http://", "https://")):
+            continue
+
+        page_index = _page_index_from_img(img_tag)
+
+        if page_index is None:
+            print(
+                "[WARN] Could not identify page container for "
+                f"final HTML image: {src}"
+            )
+            continue
+
+        crop_path = _find_local_file_in_roots(
+            search_roots=roots,
+            path_or_uri=src,
+        )
+
+        page_filename = f"rectified_image_{page_index}.png"
+
+        page_path = _find_local_file_in_roots(
+            search_roots=roots,
+            path_or_uri=page_filename,
+        )
+
+        if not crop_path:
+            print(
+                "[WARN] Could not locate final HTML crop for "
+                f"relative sizing: {src}"
+            )
+            continue
+
+        if not page_path:
+            print(
+                "[WARN] Could not locate rectified page image for "
+                f"relative sizing: {page_filename}"
+            )
+            continue
+
+        crop_width = _image_width_pixels(crop_path)
+        page_width = _image_width_pixels(page_path)
+
+        if not crop_width or not page_width:
+            print(
+                "[WARN] Could not read image dimensions for "
+                f"relative sizing: crop={crop_path}, page={page_path}"
+            )
+            continue
+
+        width_percent = (
+            float(crop_width)
+            / float(page_width)
+            * 100.0
+        )
+
+        if not 0 < width_percent <= 100:
+            print(
+                "[WARN] Unexpected final relative image width "
+                f"{width_percent:.2f}% for {src}"
+            )
+            continue
+
+        width_percent = round(width_percent, 2)
+
+        _apply_width(
+            img_tag=img_tag,
+            width_percent=width_percent,
+            source="final-crop-pixels-over-page-pixels",
+        )
+
+        print(
+            "[INFO] Applied final relative image width: "
+            f"{width_percent:.2f}% for {src}"
+        )
