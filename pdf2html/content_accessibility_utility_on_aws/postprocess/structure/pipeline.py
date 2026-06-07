@@ -7,6 +7,12 @@ from typing import Any, Dict, Optional
 import boto3
 
 from ..config import PostprocessSettings
+from .bda_html_adapter import (
+    extract_bda_html_structure,
+)
+from .comparison import (
+    build_structure_comparison,
+)
 from .models import TextractJob
 from .report import upload_json
 from .textract_parser import (
@@ -172,12 +178,13 @@ def start_structure_analysis(
 
 def finish_structure_analysis(
     job: Optional[TextractJob],
+    html_path=None,
     lambda_context=None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Retrieve Textract diagnostics when available and upload JSON reports.
+    Retrieve Textract diagnostics and upload report-only comparisons.
 
-    This sprint is report-only. It never modifies patron-facing HTML.
+    This function never modifies patron-facing HTML.
     """
     if job is None or not job.enabled:
         return None
@@ -260,6 +267,81 @@ def finish_structure_analysis(
             )
         )
 
+    bda_html_structure = None
+    comparison_report = None
+    comparison_error = None
+
+    textract_status = normalized_result.get(
+        "job_status",
+        "UNKNOWN",
+    )
+
+    if (
+        html_path
+        and textract_status
+        in {
+            "SUCCEEDED",
+            "PARTIAL_SUCCESS",
+        }
+    ):
+        try:
+            bda_html_structure = (
+                extract_bda_html_structure(
+                    html_path=html_path,
+                )
+            )
+
+            comparison_report = (
+                build_structure_comparison(
+                    bda_html_structure=(
+                        bda_html_structure
+                    ),
+                    textract_normalized=(
+                        normalized_result
+                    ),
+                )
+            )
+
+            print(
+                "[INFO] Built report-only "
+                "BDA-vs-Textract comparison"
+            )
+
+        except Exception as exc:
+            comparison_error = str(exc)
+
+            print(
+                "[WARN] BDA-vs-Textract comparison "
+                f"could not be built: {exc}"
+            )
+
+            print(
+                traceback.format_exc()
+            )
+
+    elif not html_path:
+        comparison_error = (
+            "No baseline HTML path was supplied."
+        )
+
+        print(
+            "[WARN] Skipping BDA-vs-Textract "
+            "comparison because no baseline HTML "
+            "path was supplied"
+        )
+
+    else:
+        comparison_error = (
+            "Textract result status was "
+            f"{textract_status}; comparison skipped."
+        )
+
+        print(
+            "[WARN] Skipping BDA-vs-Textract "
+            "comparison because Textract status is "
+            f"{textract_status}"
+        )
+
     diagnostics_prefix = (
         _diagnostics_prefix(
             settings=settings,
@@ -284,9 +366,35 @@ def finish_structure_analysis(
         "structure-report.json"
     )
 
+    bda_html_key = (
+        f"{diagnostics_prefix}/"
+        "bda-html-normalized.json"
+    )
+
+    comparison_key = (
+        f"{diagnostics_prefix}/"
+        "structure-comparison-report.json"
+    )
+
+    diagnostic_objects = {
+        "raw": raw_key,
+        "normalized": normalized_key,
+        "report": report_key,
+    }
+
+    if bda_html_structure is not None:
+        diagnostic_objects[
+            "bda_html_normalized"
+        ] = bda_html_key
+
+    if comparison_report is not None:
+        diagnostic_objects[
+            "comparison"
+        ] = comparison_key
+
     structure_report = {
         "layer": (
-            "textract-structure-report-only"
+            "bda-textract-structure-comparison-report-only"
         ),
         "html_changes_applied": False,
         "nova_structure_adjudication_attempted": (
@@ -327,11 +435,21 @@ def finish_structure_analysis(
             "summary",
             {},
         ),
-        "diagnostic_objects": {
-            "raw": raw_key,
-            "normalized": normalized_key,
-            "report": report_key,
-        },
+        "comparison_generated": (
+            comparison_report is not None
+        ),
+        "comparison_error": comparison_error,
+        "comparison_summary": (
+            comparison_report.get(
+                "summary",
+                {},
+            )
+            if comparison_report
+            else {}
+        ),
+        "diagnostic_objects": (
+            diagnostic_objects
+        ),
     }
 
     try:
@@ -348,6 +466,22 @@ def finish_structure_analysis(
             key=normalized_key,
             payload=normalized_result,
         )
+
+        if bda_html_structure is not None:
+            upload_json(
+                s3_client=s3,
+                bucket=job.bucket,
+                key=bda_html_key,
+                payload=bda_html_structure,
+            )
+
+        if comparison_report is not None:
+            upload_json(
+                s3_client=s3,
+                bucket=job.bucket,
+                key=comparison_key,
+                payload=comparison_report,
+            )
 
         upload_json(
             s3_client=s3,

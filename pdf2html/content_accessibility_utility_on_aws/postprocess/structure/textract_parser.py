@@ -20,23 +20,27 @@ LAYOUT_BLOCK_TYPES = {
 
 def _relationship_ids(
     block: Dict[str, Any],
+    relationship_type: str = "CHILD",
 ) -> List[str]:
-    """Return child IDs referenced by one Textract block."""
-    child_ids: List[str] = []
+    """Return IDs referenced by one Textract relationship type."""
+    related_ids: List[str] = []
 
     for relationship in block.get(
         "Relationships",
         [],
     ):
-        if relationship.get("Type") == "CHILD":
-            child_ids.extend(
+        if (
+            relationship.get("Type")
+            == relationship_type
+        ):
+            related_ids.extend(
                 relationship.get(
                     "Ids",
                     [],
                 )
             )
 
-    return child_ids
+    return related_ids
 
 
 def _collect_text(
@@ -124,6 +128,187 @@ def _bounding_box(
     }
 
 
+def _table_text(
+    related_ids: List[str],
+    blocks_by_id: Dict[str, Dict[str, Any]],
+) -> str:
+    """Resolve text from a list of related Textract block IDs."""
+    text_parts: List[str] = []
+
+    for related_id in related_ids:
+        related_block = blocks_by_id.get(
+            related_id
+        )
+
+        if not related_block:
+            continue
+
+        text = _collect_text(
+            block=related_block,
+            blocks_by_id=blocks_by_id,
+            visited_ids=set(),
+        )
+
+        if text:
+            text_parts.append(text)
+
+    return " ".join(text_parts).strip()
+
+
+def _normalize_tables(
+    blocks: List[Dict[str, Any]],
+    blocks_by_id: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Normalize Textract TABLE blocks and their cells."""
+    tables: List[Dict[str, Any]] = []
+
+    for table_index, table_block in enumerate(
+        (
+            block
+            for block in blocks
+            if block.get("BlockType") == "TABLE"
+        ),
+        start=1,
+    ):
+        cells: List[Dict[str, Any]] = []
+
+        for cell_id in _relationship_ids(
+            table_block,
+            "CHILD",
+        ):
+            cell = blocks_by_id.get(cell_id)
+
+            if (
+                not cell
+                or cell.get("BlockType")
+                != "CELL"
+            ):
+                continue
+
+            cells.append(
+                {
+                    "block_id": cell.get("Id"),
+                    "row_index": int(
+                        cell.get(
+                            "RowIndex",
+                            0,
+                        )
+                    ),
+                    "column_index": int(
+                        cell.get(
+                            "ColumnIndex",
+                            0,
+                        )
+                    ),
+                    "row_span": int(
+                        cell.get(
+                            "RowSpan",
+                            1,
+                        )
+                    ),
+                    "column_span": int(
+                        cell.get(
+                            "ColumnSpan",
+                            1,
+                        )
+                    ),
+                    "confidence": float(
+                        cell.get(
+                            "Confidence",
+                            0.0,
+                        )
+                    ),
+                    "entity_types": cell.get(
+                        "EntityTypes",
+                        [],
+                    ),
+                    "text": _collect_text(
+                        block=cell,
+                        blocks_by_id=blocks_by_id,
+                        visited_ids=set(),
+                    ),
+                    "bounding_box": _bounding_box(
+                        cell
+                    ),
+                }
+            )
+
+        merged_cell_ids = _relationship_ids(
+            table_block,
+            "MERGED_CELL",
+        )
+
+        title_ids = _relationship_ids(
+            table_block,
+            "TABLE_TITLE",
+        )
+
+        footer_ids = _relationship_ids(
+            table_block,
+            "TABLE_FOOTER",
+        )
+
+        tables.append(
+            {
+                "table_index": table_index,
+                "block_id": table_block.get(
+                    "Id"
+                ),
+                "page": table_block.get(
+                    "Page"
+                ),
+                "confidence": float(
+                    table_block.get(
+                        "Confidence",
+                        0.0,
+                    )
+                ),
+                "entity_types": table_block.get(
+                    "EntityTypes",
+                    [],
+                ),
+                "bounding_box": _bounding_box(
+                    table_block
+                ),
+                "row_count": max(
+                    (
+                        cell["row_index"]
+                        for cell in cells
+                    ),
+                    default=0,
+                ),
+                "column_count": max(
+                    (
+                        cell["column_index"]
+                        for cell in cells
+                    ),
+                    default=0,
+                ),
+                "cell_count": len(cells),
+                "merged_cell_count": len(
+                    merged_cell_ids
+                ),
+                "title": _table_text(
+                    related_ids=title_ids,
+                    blocks_by_id=blocks_by_id,
+                ),
+                "footer": _table_text(
+                    related_ids=footer_ids,
+                    blocks_by_id=blocks_by_id,
+                ),
+                "cells": sorted(
+                    cells,
+                    key=lambda item: (
+                        item["row_index"],
+                        item["column_index"],
+                    ),
+                ),
+            }
+        )
+
+    return tables
+
+
 def normalize_textract_result(
     raw_result: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -208,6 +393,11 @@ def normalize_textract_result(
         for item in layout_elements
     )
 
+    tables = _normalize_tables(
+        blocks=blocks,
+        blocks_by_id=blocks_by_id,
+    )
+
     return {
         "job_status": raw_result.get(
             "JobStatus",
@@ -259,8 +449,10 @@ def normalize_textract_result(
                     layout_counts.items()
                 )
             ),
+            "table_count": len(tables),
         },
         "layout_elements": (
             layout_elements
         ),
+        "tables": tables,
     }

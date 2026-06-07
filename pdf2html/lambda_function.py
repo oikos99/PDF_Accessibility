@@ -23,7 +23,7 @@ from content_accessibility_utility_on_aws.postprocess.structure import (
 )
 
 
-DEPLOY_MARKER = "TEXTRACT_REPORT_ONLY_V1_20260606"
+DEPLOY_MARKER = "TEXTRACT_COMPARISON_REPORT_V1_20260606"
 s3 = boto3.client("s3")
 
 def sanitize_filename(filename):
@@ -536,18 +536,18 @@ def lambda_handler(event, context):
             print(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
-        # Retrieve optional Textract diagnostics.
-        # This sprint is report-only and does not modify the HTML.
-        structure_report = finish_structure_analysis(
-            job=structure_job,
-            lambda_context=context,
-        )
-
-        if structure_report:
-            print(
-                "[INFO] Textract structure report status: "
-                f"{structure_report.get('result_status')}"
-            )
+        # # Retrieve optional Textract diagnostics.
+        # # This sprint is report-only and does not modify the HTML.
+        # structure_report = finish_structure_analysis(
+        #     job=structure_job,
+        #     lambda_context=context,
+        # )
+        #
+        # if structure_report:
+        #     print(
+        #         "[INFO] Textract structure report status: "
+        #         f"{structure_report.get('result_status')}"
+        #     )
 
         # 4) Clean up intermediate files and upload one self-contained HTML file
         try:
@@ -705,6 +705,20 @@ def lambda_handler(event, context):
             #     }
             # )
             final_html_path = find_final_html(temp_output_dir, conversion_result)
+
+            # Build report-only BDA-vs-Textract diagnostics before applying
+            # custom HTML cleanup, image sizing, or alt-text changes.
+            structure_report = finish_structure_analysis(
+                job=structure_job,
+                html_path=final_html_path,
+                lambda_context=context,
+            )
+
+            if structure_report:
+                print(
+                    "[INFO] Textract structure report status: "
+                    f"{structure_report.get('result_status')}"
+                )
 
             # Improve page navigation link text.
             final_html_path = enhance_page_navigation_labels(final_html_path)
