@@ -160,7 +160,7 @@ class Pdf2HtmlStack extends Stack {
 
        // Optional structural-analysis layer.
        TEXTRACT_STRUCTURE_ENABLED: 'true',
-       STRUCTURE_APPLY_HTML_CHANGES_ENABLED: 'false',
+       STRUCTURE_APPLY_HTML_CHANGES_ENABLED: 'true',
        TEXTRACT_MAX_WAIT_SECONDS: '120',
        TEXTRACT_POLL_INTERVAL_SECONDS: '3',
        TEXTRACT_LAMBDA_RESERVE_SECONDS: '45',

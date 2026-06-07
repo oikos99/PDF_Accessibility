@@ -21,9 +21,12 @@ from content_accessibility_utility_on_aws.postprocess.structure import (
     finish_structure_analysis,
     start_structure_analysis,
 )
+from content_accessibility_utility_on_aws.postprocess.structure.html_cleanup import (
+    apply_structure_html_cleanup,
+)
 
 
-DEPLOY_MARKER = "TEXTRACT_COMPARISON_REPORT_V1_20260606"
+DEPLOY_MARKER = "TEXTRACT_STRUCTURE_CLEANUP_V1_20260607"
 s3 = boto3.client("s3")
 
 def sanitize_filename(filename):
@@ -181,184 +184,509 @@ def embed_local_images_as_base64(html_path, search_roots):
 
 def enhance_page_navigation_labels(html_path):
     """
-    Replace generic page nav links like "Page 1" with more meaningful labels:
-    "Page 1 - [first heading or first sentence]".
+    Build useful page-navigation labels after structural cleanup.
+
+    Include the printed page number when Textract has identified one.
     """
     import re
+
     from bs4 import BeautifulSoup
 
     def clean_text(text):
-        text = re.sub(r"\s+", " ", text or "").strip()
-        return text
+        return re.sub(
+            r"\s+",
+            " ",
+            text or "",
+        ).strip()
 
-    def first_sentence(text, max_len=90):
-        text = clean_text(text)
+    def first_sentence(
+        text,
+        max_len=90,
+    ):
+        text = clean_text(
+            text
+        )
+
         if not text:
             return ""
 
-        # Prefer sentence-ending punctuation.
-        match = re.search(r"(.{20,}?[.!?])\s", text)
-        if match:
-            text = match.group(1)
+        match = re.search(
+            r"(.{20,}?[.!?])\s",
+            text,
+        )
 
-        # Keep link text short enough to be usable.
-        if len(text) > max_len:
-            text = text[:max_len].rsplit(" ", 1)[0] + "..."
+        if match:
+            text = match.group(
+                1
+            )
+
+        if len(
+            text
+        ) > max_len:
+            text = (
+                text[
+                    :max_len
+                ].rsplit(
+                    " ",
+                    1,
+                )[0]
+                + "..."
+            )
 
         return text
 
     def is_bad_heading(text):
-        text = clean_text(text).lower()
+        text = clean_text(
+            text
+        ).lower()
 
         if not text:
             return True
 
-        # Skip generated page labels.
-        if re.fullmatch(r"page\s*\d+", text):
+        if re.fullmatch(
+            r"(pdf\s+)?page\s*\d+",
+            text,
+        ):
             return True
 
-        # Skip bare page numbers.
-        if re.fullmatch(r"\d+", text):
+        if re.fullmatch(
+            r"\d+",
+            text,
+        ):
             return True
 
         return False
 
-    def get_page_label(page):
-        # Find headings inside the page section.
-        headings = page.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+    def page_prefix(
+        page,
+        index,
+    ):
+        printed_value = clean_text(
+            page.get(
+                "data-printed-page-number",
+                "",
+            )
+        )
 
-        # Highest heading level means h1 first, then h2, then h3, etc.
-        for level in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+        if printed_value:
+            return (
+                f"PDF page {index} "
+                f"· printed page "
+                f"{printed_value}"
+            )
+
+        return (
+            f"PDF page {index}"
+        )
+
+    def get_page_label(page):
+        headings = page.find_all(
+            [
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+            ]
+        )
+
+        for level in [
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+        ]:
             for heading in headings:
-                if heading.name != level:
+                if (
+                    heading.name
+                    != level
+                ):
                     continue
 
-                text = clean_text(heading.get_text(" ", strip=True))
+                text = clean_text(
+                    heading.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
 
-                if not is_bad_heading(text):
-                    return first_sentence(text)
+                if not (
+                    is_bad_heading(
+                        text
+                    )
+                ):
+                    return first_sentence(
+                        text
+                    )
 
-        # Fallback: use the first meaningful text in the page.
-        text = clean_text(page.get_text(" ", strip=True))
-        return first_sentence(text)
+        clone = BeautifulSoup(
+            str(page),
+            "html.parser",
+        )
 
-    html_path = Path(html_path)
-    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+        for marker in clone.select(
+            ".page-marker"
+        ):
+            marker.decompose()
 
-    pages = soup.select('[id^="page-"]')
+        text = clean_text(
+            clone.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        return first_sentence(
+            text
+        )
+
+    html_path = Path(
+        html_path
+    )
+
+    soup = BeautifulSoup(
+        html_path.read_text(
+            encoding="utf-8"
+        ),
+        "html.parser",
+    )
+
+    pages = soup.select(
+        '[id^="page-"]'
+    )
 
     if not pages:
-        print("[WARN] No page sections found for navigation labeling")
-        return str(html_path)
+        print(
+            "[WARN] No page sections found "
+            "for navigation labeling"
+        )
 
-    # Find an existing nav with page links.
-    nav = soup.find("nav")
+        return str(
+            html_path
+        )
+
+    nav = soup.find(
+        "nav"
+    )
+
     if nav is None:
-        nav = soup.new_tag("nav")
-        nav["aria-label"] = "Document pages"
-        ul = soup.new_tag("ul")
-        nav.append(ul)
+        nav = soup.new_tag(
+            "nav"
+        )
 
-        main = soup.find("main")
+        ul = soup.new_tag(
+            "ul"
+        )
+
+        nav.append(
+            ul
+        )
+
+        main = soup.find(
+            "main"
+        )
+
         if main:
-            main.insert_before(nav)
-        else:
-            soup.body.insert(0, nav)
-    else:
-        nav["aria-label"] = nav.get("aria-label") or "Document pages"
-        ul = nav.find("ul")
-        if ul is None:
-            ul = soup.new_tag("ul")
-            nav.append(ul)
+            main.insert_before(
+                nav
+            )
 
-    ul = nav.find("ul")
+        else:
+            soup.body.insert(
+                0,
+                nav,
+            )
+
+    else:
+        ul = nav.find(
+            "ul"
+        )
+
+        if ul is None:
+            ul = soup.new_tag(
+                "ul"
+            )
+
+            nav.append(
+                ul
+            )
+
+    nav[
+        "aria-label"
+    ] = "Document pages"
+
+    nav[
+        "role"
+    ] = "doc-pagelist"
+
+    ul = nav.find(
+        "ul"
+    )
+
     ul.clear()
 
-    for index, page in enumerate(pages, start=1):
-        page_id = page.get("id")
+    for index, page in enumerate(
+        pages,
+        start=1,
+    ):
+        page_id = page.get(
+            "id"
+        )
+
         if not page_id:
             continue
 
-        label = get_page_label(page)
+        prefix = page_prefix(
+            page,
+            index,
+        )
+
+        label = get_page_label(
+            page
+        )
 
         if label:
-            link_text = f"Page {index} - {label}"
+            link_text = (
+                f"{prefix} - {label}"
+            )
+
         else:
-            link_text = f"Page {index}"
+            link_text = (
+                prefix
+            )
 
-        li = soup.new_tag("li")
-        a = soup.new_tag("a", href=f"#{page_id}")
-        a.string = link_text
-        li.append(a)
-        ul.append(li)
+        li = soup.new_tag(
+            "li"
+        )
 
-        print(f"[INFO] Page nav label: {link_text}")
+        link = soup.new_tag(
+            "a",
+            href=(
+                f"#{page_id}"
+            ),
+        )
 
-    html_path.write_text(str(soup), encoding="utf-8")
-    return str(html_path)
+        link.string = (
+            link_text
+        )
+
+        li.append(
+            link
+        )
+
+        ul.append(
+            li
+        )
+
+        print(
+            "[INFO] Page nav label: "
+            f"{link_text}"
+        )
+
+    html_path.write_text(
+        str(soup),
+        encoding="utf-8",
+    )
+
+    return str(
+        html_path
+    )
 
 
 def add_page_markers(html_path):
     """
-    Ensure every page section starts with a visible Page X marker.
+    Ensure every page section begins with a visible PDF-page marker.
 
-    This does not change heading levels. It adds a non-heading page boundary
-    marker at the start of each div whose id begins with "page-".
+    The optional Textract cleanup may later enrich this marker with the
+    original printed page number.
     """
-    html_path = Path(html_path)
-    soup = BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
+    html_path = Path(
+        html_path
+    )
 
-    pages = soup.select('div[id^="page-"]')
+    soup = BeautifulSoup(
+        html_path.read_text(
+            encoding="utf-8"
+        ),
+        "html.parser",
+    )
+
+    pages = soup.select(
+        'div[id^="page-"]'
+    )
 
     if not pages:
-        print("[WARN] No page sections found for page markers")
-        return str(html_path)
+        print(
+            "[WARN] No page sections found "
+            "for page markers"
+        )
 
-    # Add simple styling if it does not already exist.
-    head = soup.find("head")
-    if head and not soup.find("style", attrs={"data-page-marker-style": "true"}):
-        style = soup.new_tag("style")
-        style["data-page-marker-style"] = "true"
+        return str(
+            html_path
+        )
+
+    head = soup.find(
+        "head"
+    )
+
+    if (
+        head
+        and not soup.find(
+            "style",
+            attrs={
+                "data-page-marker-style": (
+                    "true"
+                )
+            },
+        )
+    ):
+        style = soup.new_tag(
+            "style"
+        )
+
+        style[
+            "data-page-marker-style"
+        ] = "true"
+
         style.string = """
-        .page-marker {
-            font-weight: bold;
-            margin-top: 1.5rem;
-            margin-bottom: 1rem;
-        }
-        """
-        head.append(style)
+.page-marker {
+  font-weight: bold;
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+}
+""".strip()
 
-    for index, page in enumerate(pages, start=1):
-        page_label = f"Page {index}"
+        head.append(
+            style
+        )
 
-        # If this page already starts with our page marker, update it and move on.
+    for index, page in enumerate(
+        pages,
+        start=1,
+    ):
+        page[
+            "data-pdf-page-number"
+        ] = str(
+            index
+        )
+
+        printed_value = (
+            page.get(
+                "data-printed-page-number",
+                "",
+            )
+        )
+
+        if printed_value:
+            visible_label = (
+                f"PDF page {index} "
+                f"· printed page {printed_value}"
+            )
+
+            accessible_label = (
+                f"PDF page {index}, "
+                f"printed page {printed_value}"
+            )
+
+        else:
+            visible_label = (
+                f"PDF page {index}"
+            )
+
+            accessible_label = (
+                visible_label
+            )
+
         first_element = next(
-            (child for child in page.children if getattr(child, "name", None)),
-            None
+            (
+                child
+                for child
+                in page.children
+                if getattr(
+                    child,
+                    "name",
+                    None,
+                )
+            ),
+            None,
         )
 
         if (
             first_element
-            and first_element.name == "p"
-            and "page-marker" in first_element.get("class", [])
+            and first_element.name
+            == "p"
+            and "page-marker"
+            in first_element.get(
+                "class",
+                [],
+            )
         ):
-            first_element.string = page_label
-            first_element["role"] = "doc-pagebreak"
-            first_element["aria-label"] = page_label
-            continue
+            marker = (
+                first_element
+            )
 
-        marker = soup.new_tag("p")
-        marker["class"] = "page-marker"
-        marker["role"] = "doc-pagebreak"
-        marker["aria-label"] = page_label
-        marker.string = page_label
+        else:
+            marker = soup.new_tag(
+                "p"
+            )
 
-        page.insert(0, marker)
+            marker[
+                "class"
+            ] = [
+                "page-marker"
+            ]
 
-        print(f"[INFO] Added page marker: {page_label} to #{page.get('id')}")
+            page.insert(
+                0,
+                marker,
+            )
 
-    html_path.write_text(str(soup), encoding="utf-8")
-    return str(html_path)
+        marker[
+            "role"
+        ] = "doc-pagebreak"
+
+        marker[
+            "aria-label"
+        ] = accessible_label
+
+        marker[
+            "data-pdf-page-number"
+        ] = str(
+            index
+        )
+
+        if printed_value:
+            marker[
+                "data-printed-page-number"
+            ] = printed_value
+
+        else:
+            marker.attrs.pop(
+                "data-printed-page-number",
+                None,
+            )
+
+        marker.string = (
+            visible_label
+        )
+
+        print(
+            "[INFO] Added PDF page marker: "
+            f"{visible_label} "
+            f"to #{page.get('id')}"
+        )
+
+    html_path.write_text(
+        str(soup),
+        encoding="utf-8",
+    )
+
+    return str(
+        html_path
+    )
 
 
 def lambda_handler(event, context):
@@ -720,14 +1048,47 @@ def lambda_handler(event, context):
                     f"{structure_report.get('result_status')}"
                 )
 
-            # Improve page navigation link text.
-            final_html_path = enhance_page_navigation_labels(final_html_path)
-
-            # Add visible page markers at the start of each page section.
-            final_html_path = add_page_markers(final_html_path)
+            # # Improve page navigation link text.
+            # final_html_path = enhance_page_navigation_labels(final_html_path)
+            #
+            # # Add visible page markers at the start of each page section.
+            # final_html_path = add_page_markers(final_html_path)
+            #
+            # # Add the main landmark, skip link, and predominant page language.
+            # final_html_path = apply_html_hygiene(
+            #     final_html_path
+            # )
+            # Add visible PDF-page markers before merging printed pagination.
+            final_html_path = add_page_markers(
+                final_html_path
+            )
 
             # Add the main landmark, skip link, and predominant page language.
             final_html_path = apply_html_hygiene(
+                final_html_path
+            )
+
+            # Apply the optional Textract-assisted structure cleanup.
+            #
+            # If Textract is disabled or unavailable, this safely falls back
+            # to a filename-based browser title and preserves the baseline HTML.
+            textract_normalized = (
+                structure_report.get(
+                    "_textract_normalized"
+                )
+                if structure_report
+                else None
+            )
+
+            final_html_path = apply_structure_html_cleanup(
+                html_path=final_html_path,
+                filename_base=filename_base,
+                textract_normalized=textract_normalized,
+            )
+
+            # Build the navigation labels after removing repeated running
+            # headers and merging visible printed-page metadata.
+            final_html_path = enhance_page_navigation_labels(
                 final_html_path
             )
 

@@ -18,7 +18,7 @@ class TextractClient:
         client_request_token: str,
     ) -> str:
         """
-        Start asynchronous Layout and Tables analysis.
+        Start asynchronous Layout analysis.
 
         The PDF remains in the existing uploads/ S3 location.
         """
@@ -31,7 +31,6 @@ class TextractClient:
             },
             FeatureTypes=[
                 "LAYOUT",
-                "TABLES",
             ],
             ClientRequestToken=client_request_token,
         )

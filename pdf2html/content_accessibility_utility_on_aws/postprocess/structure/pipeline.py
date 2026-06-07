@@ -500,4 +500,12 @@ def finish_structure_analysis(
             traceback.format_exc()
         )
 
+    # Keep the normalized Textract result in memory for the optional
+    # patron-facing HTML cleanup pass. This private value is added only
+    # after diagnostic uploads, so it is not written into structure-report.json.
+    structure_report["_textract_normalized"] = (
+        normalized_result
+    )
+
+
     return structure_report
