@@ -201,7 +201,11 @@ def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
     metrics["bad_ocr_detected"] = bool(metrics["bad_ocr_pages"] or overall_quality.get("bad_ocr_detected"))
     return metrics
 def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) -> tuple[list[str], subprocess.CompletedProcess[str]]:
-    """Run OCRmyPDF and return the command plus CompletedProcess."""
+    """Run OCRmyPDF and return the command plus CompletedProcess.
+
+    Important: OCRmyPDF --redo-ocr is not compatible with --deskew.
+    Use --deskew for new OCR/force OCR, but not redo OCR.
+    """
     cmd = [
         "ocrmypdf",
         "--jobs",
@@ -209,7 +213,6 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
         "--output-type",
         "pdf",
         "--rotate-pages",
-        "--deskew",
         "--optimize",
         "0",
         "--language",
@@ -217,11 +220,11 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
     ]
 
     if mode in ("auto", "always"):
-        cmd.append("--skip-text")
+        cmd.extend(["--deskew", "--skip-text"])
     elif mode == "redo":
         cmd.append("--redo-ocr")
     elif mode == "force":
-        cmd.append("--force-ocr")
+        cmd.extend(["--deskew", "--force-ocr"])
     else:
         raise ValueError(f"Unsupported OCR mode for OCRmyPDF execution: {mode}")
 
@@ -233,7 +236,6 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
     if completed.stderr:
         logger.info("OCRmyPDF stderr:\n%s", completed.stderr)
     return cmd, completed
-
 
 def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Path) -> Path:
     """Optionally OCR the chunk before OpenDataLoader tagging.
