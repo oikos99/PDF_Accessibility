@@ -316,15 +316,74 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
 
     if completed.returncode == 0 and ocr_pdf.exists():
         report["ocr_succeeded"] = True
+        report["ocr_stdout_tail"] = (completed.stdout or "")[-4000:]
+        report["ocr_stderr_tail"] = (completed.stderr or "")[-4000:]
+
+        post_ocr_metrics = analyze_text_layer(ocr_pdf, threshold)
+        report["post_ocr_preflight"] = post_ocr_metrics
+
+        stderr_lower = (completed.stderr or "").lower()
+        redo_warning_needs_force = (
+            "cannot be mapped to characters" in stderr_lower
+            or "consider using --force-ocr" in stderr_lower
+            or "damaged character map" in stderr_lower
+        )
+
+        force_fallback_enabled = os.environ.get("OCR_FORCE_FALLBACK", "true").strip().lower() in {
+            "1", "true", "yes", "y", "on"
+        }
+        force_on_bad_text = os.environ.get("OCR_FORCE_FALLBACK_ON_BAD_TEXT", "true").strip().lower() in {
+            "1", "true", "yes", "y", "on"
+        }
+
+        redo_still_bad = bool(post_ocr_metrics.get("bad_ocr_detected"))
+
+        if (
+            effective_mode == "redo"
+            and force_fallback_enabled
+            and (redo_warning_needs_force or (force_on_bad_text and redo_still_bad))
+        ):
+            force_pdf = work_dir / f"force_ocr_{downloaded_pdf.name}"
+            report["force_fallback_attempted"] = True
+            report["force_fallback_reason"] = {
+                "redo_warning_needs_force": redo_warning_needs_force,
+                "redo_still_bad": redo_still_bad,
+            }
+
+            force_cmd, force_completed = run_ocrmypdf(downloaded_pdf, force_pdf, "force", language)
+            report["force_ocr_command"] = force_cmd
+            report["force_ocr_returncode"] = force_completed.returncode
+            report["force_ocr_stdout_tail"] = (force_completed.stdout or "")[-4000:]
+            report["force_ocr_stderr_tail"] = (force_completed.stderr or "")[-4000:]
+
+            if force_completed.returncode == 0 and force_pdf.exists():
+                report["force_ocr_succeeded"] = True
+                report["ocr_output_used"] = True
+                report["selected_input_for_opendataloader"] = str(force_pdf)
+                report["post_force_ocr_preflight"] = analyze_text_layer(force_pdf, threshold)
+                (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+                logger.info("Force OCR fallback succeeded; using %s for OpenDataLoader", force_pdf)
+                return force_pdf
+
+            report["force_ocr_succeeded"] = False
+            if on_failure == "fallback":
+                report["decision_after_force_failure"] = "Force OCR failed; using redo OCR output because redo succeeded."
+                report["ocr_output_used"] = True
+                report["selected_input_for_opendataloader"] = str(ocr_pdf)
+                (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+                logger.warning("Force OCR fallback failed; using redo OCR output")
+                return ocr_pdf
+
+            (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            raise RuntimeError(f"Force OCR fallback failed with exit code {force_completed.returncode}")
+
         report["ocr_output_used"] = True
         report["selected_input_for_opendataloader"] = str(ocr_pdf)
-        report["post_ocr_preflight"] = analyze_text_layer(ocr_pdf, threshold)
+        report["force_fallback_attempted"] = False
         (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         logger.info("OCR succeeded; using %s for OpenDataLoader", ocr_pdf)
         return ocr_pdf
 
-    report["ocr_stdout_tail"] = (completed.stdout or "")[-4000:]
-    report["ocr_stderr_tail"] = (completed.stderr or "")[-4000:]
 
     if on_failure == "fallback":
         report["decision_after_failure"] = "OCR failed; falling back to original PDF."
