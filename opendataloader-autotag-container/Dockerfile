@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         openjdk-21-jre \
         tesseract-ocr \
-        tesseract-ocr-eng \
+        tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-spa \
         ghostscript \
         qpdf \
         unpaper \
