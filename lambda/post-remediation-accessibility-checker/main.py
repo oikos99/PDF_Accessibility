@@ -548,7 +548,182 @@ def image_review(pdf_path: Path, text: str) -> dict[str, Any]:
     return report
 
 
-def finalize_pdf(input_pdf: Path, output_pdf: Path, language_result: dict[str, Any]) -> dict[str, Any]:
+
+def should_update_alt_text(value: Any) -> bool:
+    alt = str(value or "").strip()
+    if not alt:
+        return True
+    return bool(GENERIC_ALT_RE.match(alt))
+
+
+def struct_figure_elements(node: Any) -> list[DictionaryObject]:
+    figures: list[DictionaryObject] = []
+
+    try:
+        node = get_root_object(node)
+    except Exception:
+        return figures
+
+    if isinstance(node, DictionaryObject):
+        tag = str(node.get("/S") or "").lstrip("/")
+        if tag.lower() == "figure":
+            figures.append(node)
+
+        kids = node.get("/K")
+        if isinstance(kids, list):
+            for kid in kids:
+                figures.extend(struct_figure_elements(kid))
+        elif kids is not None and not isinstance(kids, (int, float)):
+            figures.extend(struct_figure_elements(kids))
+
+    return figures
+
+
+def image_key(item: dict[str, Any]) -> tuple[Any, Any, str]:
+    return (
+        item.get("page"),
+        item.get("xref"),
+        json.dumps(item.get("bbox", []), sort_keys=True),
+    )
+
+
+def build_alt_decisions(image_report: dict[str, Any]) -> list[dict[str, Any]]:
+    min_conf = env_float("AI_IMAGE_APPLY_MIN_CONFIDENCE", 0.60)
+
+    review_by_key: dict[tuple[Any, Any, str], dict[str, Any]] = {}
+    for entry in image_report.get("ai_reviews", []):
+        item = entry.get("image") or {}
+        review = entry.get("review") or {}
+        review_by_key[image_key(item)] = review
+
+    decisions: list[dict[str, Any]] = []
+
+    for item in image_report.get("items", []):
+        classification = item.get("classification")
+        review = review_by_key.get(image_key(item), {})
+
+        alt_text = ""
+        source = "none"
+        needs_manual_review = False
+
+        if classification == "full_page_scan_background":
+            alt_text = "Scanned page image; text content is available in the document text layer."
+            source = "deterministic_full_page_scan"
+        elif classification == "small_decorative_or_noise":
+            alt_text = "Decorative image."
+            source = "deterministic_decorative"
+        elif classification == "meaningful_candidate":
+            review_class = str(review.get("classification") or "").strip()
+            review_conf = float(review.get("confidence") or 0.0)
+            candidate_alt = str(review.get("alt_text") or "").strip()
+
+            if review_class == "meaningful_figure" and candidate_alt and review_conf >= min_conf:
+                alt_text = candidate_alt
+                source = "bedrock"
+            elif review_class in {"decorative", "full_page_scan_background"} and review_conf >= min_conf:
+                alt_text = (
+                    "Decorative image."
+                    if review_class == "decorative"
+                    else "Scanned page image; text content is available in the document text layer."
+                )
+                source = f"bedrock_{review_class}"
+            else:
+                needs_manual_review = True
+                source = "manual_review_required"
+        else:
+            needs_manual_review = True
+            source = "unknown_image_classification"
+
+        decisions.append({
+            "page": item.get("page"),
+            "xref": item.get("xref"),
+            "bbox": item.get("bbox"),
+            "classification": classification,
+            "alt_text": alt_text[:1000],
+            "source": source,
+            "needs_manual_review": needs_manual_review,
+        })
+
+    return decisions
+
+
+def apply_image_alt_text_to_figures(writer: PdfWriter, image_report: dict[str, Any]) -> dict[str, Any]:
+    mode = os.environ.get("AI_IMAGE_REVIEW_MODE", "report").strip().lower()
+
+    result: dict[str, Any] = {
+        "mode": mode,
+        "attempted": False,
+        "figure_count": 0,
+        "decisions_count": 0,
+        "updated_count": 0,
+        "skipped_existing_specific_alt_count": 0,
+        "skipped_no_decision_count": 0,
+        "manual_review_count": 0,
+        "notes": [],
+    }
+
+    if mode not in {"apply", "write", "true", "yes", "on"}:
+        result["notes"].append("AI image review is not in apply mode; leaving PDF /Alt values unchanged.")
+        return result
+
+    root = writer._root_object
+    struct_root = root.get("/StructTreeRoot")
+    if not struct_root:
+        result["notes"].append("No StructTreeRoot found; cannot update Figure /Alt values.")
+        return result
+
+    struct_root = get_root_object(struct_root)
+    kids = struct_root.get("/K") if isinstance(struct_root, DictionaryObject) else None
+
+    figures: list[DictionaryObject] = []
+    if isinstance(kids, list):
+        for kid in kids:
+            figures.extend(struct_figure_elements(kid))
+    elif kids is not None:
+        figures.extend(struct_figure_elements(kids))
+
+    decisions = build_alt_decisions(image_report)
+    result["attempted"] = True
+    result["figure_count"] = len(figures)
+    result["decisions_count"] = len(decisions)
+
+    for index, fig in enumerate(figures):
+        if index >= len(decisions):
+            result["skipped_no_decision_count"] += 1
+            continue
+
+        current_alt = fig.get("/Alt")
+        if not should_update_alt_text(current_alt):
+            result["skipped_existing_specific_alt_count"] += 1
+            continue
+
+        decision = decisions[index]
+        alt_text = str(decision.get("alt_text") or "").strip()
+
+        if not alt_text:
+            result["manual_review_count"] += 1
+            continue
+
+        fig[NameObject("/Alt")] = TextStringObject(alt_text)
+        result["updated_count"] += 1
+
+        if decision.get("needs_manual_review"):
+            result["manual_review_count"] += 1
+
+    if len(figures) != len(decisions):
+        result["notes"].append(
+            f"Figure count ({len(figures)}) and image decision count ({len(decisions)}) differ; mapping is best-effort by order."
+        )
+
+    return result
+
+
+def finalize_pdf(
+    input_pdf: Path,
+    output_pdf: Path,
+    language_result: dict[str, Any],
+    image_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     reader = PdfReader(str(input_pdf))
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
@@ -566,6 +741,8 @@ def finalize_pdf(input_pdf: Path, output_pdf: Path, language_result: dict[str, A
         for page in writer.pages:
             page[NameObject("/Tabs")] = NameObject(tab_order)
 
+    alt_writeback = apply_image_alt_text_to_figures(writer, image_report or {})
+
     try:
         writer.create_viewer_preferences()
         writer.viewer_preferences.display_doctitle = True
@@ -575,18 +752,22 @@ def finalize_pdf(input_pdf: Path, output_pdf: Path, language_result: dict[str, A
     with output_pdf.open("wb") as f:
         writer.write(f)
 
-    # Re-open to verify.
     verified = PdfReader(str(output_pdf))
     verified_root = verified.trailer["/Root"]
+
     tabs_values = []
     for page in verified.pages:
         tabs_values.append(str(page.get("/Tabs")) if page.get("/Tabs") is not None else None)
+
+    verified_structure = analyze_structure(verified)
 
     return {
         "before_lang": str(before_lang) if before_lang is not None else None,
         "after_lang": str(verified_root.get("/Lang")) if verified_root.get("/Lang") is not None else None,
         "tabs_values_sample": tabs_values[:10],
         "all_pages_tabs_s": all(value == "/S" for value in tabs_values) if tabs_values else False,
+        "image_alt_writeback": alt_writeback,
+        "post_writeback_structure": verified_structure,
     }
 
 
@@ -606,12 +787,13 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         text, page_counts = extract_pdf_text(input_pdf)
         quality = ocr_quality_metrics(text)
         language_result = choose_document_language(text, quality)
-        finalize_result = finalize_pdf(input_pdf, output_pdf, language_result)
+        images = image_review(input_pdf, text)
+        finalize_result = finalize_pdf(input_pdf, output_pdf, language_result, images)
 
         # Analyze finalized file so QA reflects what users receive.
         finalized_reader = PdfReader(str(output_pdf))
         structure = analyze_structure(finalized_reader)
-        images = image_review(output_pdf, text)
+        # Image review already ran before finalization so the same decisions can be written into /Alt.
 
         qa = {
             "file": file_name,
