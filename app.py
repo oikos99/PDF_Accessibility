@@ -370,7 +370,20 @@ class PDFAccessibility(Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler='main.lambda_handler',
             code=lambda_.Code.from_docker_build('lambda/post-remediation-accessibility-checker'),
-            timeout=Duration.seconds(900),
+            environment={
+            'DOCUMENT_LANGUAGE_MODE': os.environ.get('DOCUMENT_LANGUAGE_MODE', 'auto'),
+            'DOCUMENT_LANGUAGE_OVERRIDE': os.environ.get('DOCUMENT_LANGUAGE_OVERRIDE', ''),
+            'DOCUMENT_LANGUAGE_CONFIDENCE_THRESHOLD': os.environ.get('DOCUMENT_LANGUAGE_CONFIDENCE_THRESHOLD', '0.75'),
+            'DOCUMENT_LANGUAGE_USE_BEDROCK': os.environ.get('DOCUMENT_LANGUAGE_USE_BEDROCK', 'true'),
+            'DOCUMENT_LANGUAGE_MODEL': os.environ.get('DOCUMENT_LANGUAGE_MODEL', 'us.amazon.nova-lite-v1:0'),
+            'FINALIZER_SET_TABS': os.environ.get('FINALIZER_SET_TABS', 'true'),
+            'PDF_TAB_ORDER': os.environ.get('PDF_TAB_ORDER', 'S'),
+            'AI_IMAGE_REVIEW_MODE': os.environ.get('AI_IMAGE_REVIEW_MODE', 'report'),
+            'AI_IMAGE_REVIEW_MODEL': os.environ.get('AI_IMAGE_REVIEW_MODEL', os.environ.get('DOCUMENT_LANGUAGE_MODEL', 'us.amazon.nova-lite-v1:0')),
+            'AI_IMAGE_REVIEW_MAX_IMAGES': os.environ.get('AI_IMAGE_REVIEW_MAX_IMAGES', '8'),
+            'OCR_BAD_TEXT_THRESHOLD': os.environ.get('OCR_BAD_TEXT_THRESHOLD', '0.08'),
+        },
+timeout=Duration.seconds(900),
             memory_size=512,
             architecture=lambda_arch,
         )
@@ -382,6 +395,14 @@ class PDFAccessibility(Stack):
         ))
         pdf_processing_bucket.grant_read_write(post_remediation_accessibility_checker)
         post_remediation_accessibility_checker.add_to_role_policy(cloudwatch_metrics_policy)
+post_remediation_accessibility_checker.add_to_role_policy(iam.PolicyStatement(
+    actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    resources=["*"],
+))
+post_remediation_accessibility_checker.add_to_role_policy(iam.PolicyStatement(
+    actions=["sts:GetCallerIdentity"],
+    resources=["*"],
+))
 
         post_remediation_accessibility_checker_task = tasks.LambdaInvoke(
             self, 

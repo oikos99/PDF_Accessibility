@@ -33,12 +33,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import shlex
 import sqlite3
 import socket
 import subprocess
 import sys
+import unicodedata
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -90,26 +92,100 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def text_quality_metrics(text: str, bad_token_threshold: float = 0.08) -> dict[str, Any]:
+    """Detect corrupt existing OCR/text layers without assuming English-only text."""
+    stripped = text or ""
+    total = len(stripped)
+    if total == 0:
+        return {
+            "char_count": 0,
+            "replacement_count": 0,
+            "control_count": 0,
+            "suspicious_symbol_count": 0,
+            "word_count": 0,
+            "bad_token_count": 0,
+            "bad_token_ratio": 0.0,
+            "bad_ocr_detected": False,
+        }
+
+    replacement_count = stripped.count("\ufffd")
+    control_count = sum(
+        1
+        for ch in stripped
+        if unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\r\t"
+    )
+    suspicious_symbol_count = sum(1 for ch in stripped if ch in "@#$%^*_~=�")
+
+    words = re.findall(r"\S+", stripped)
+    bad_tokens: list[str] = []
+    for word in words:
+        if "\ufffd" in word:
+            bad_tokens.append(word)
+            continue
+        if len(word) >= 4:
+            bad_chars = sum(1 for ch in word if not (ch.isalnum() or ch in "-'’./:,;()[]#&+"))
+            if bad_chars / max(len(word), 1) > 0.35:
+                bad_tokens.append(word)
+
+    word_count = len(words)
+    bad_token_ratio = len(bad_tokens) / max(word_count, 1)
+    suspicious_symbol_ratio = suspicious_symbol_count / max(total, 1)
+    control_ratio = control_count / max(total, 1)
+
+    bad_ocr_detected = bool(
+        replacement_count > 0
+        or control_count > 0
+        or bad_token_ratio >= bad_token_threshold
+        or suspicious_symbol_ratio >= 0.06
+        or control_ratio >= 0.01
+    )
+
+    return {
+        "char_count": total,
+        "replacement_count": replacement_count,
+        "control_count": control_count,
+        "suspicious_symbol_count": suspicious_symbol_count,
+        "suspicious_symbol_ratio": round(suspicious_symbol_ratio, 4),
+        "word_count": word_count,
+        "bad_token_count": len(bad_tokens),
+        "bad_token_ratio": round(bad_token_ratio, 4),
+        "sample_bad_tokens": bad_tokens[:20],
+        "bad_ocr_detected": bad_ocr_detected,
+    }
+
+
 def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
-    """Return simple page-level extractable-text metrics for OCR preflight."""
+    """Return page-level text metrics plus corrupt-OCR detection for OCR preflight."""
+    bad_token_threshold = float(os.environ.get("OCR_BAD_TEXT_THRESHOLD", "0.08") or "0.08")
     metrics: dict[str, Any] = {
         "page_count": 0,
         "page_text_char_counts": [],
         "low_text_pages": [],
+        "bad_ocr_pages": [],
         "threshold": threshold,
+        "bad_text_threshold": bad_token_threshold,
         "has_extractable_text": False,
         "needs_ocr": False,
+        "bad_ocr_detected": False,
+        "page_quality": [],
     }
 
+    all_text: list[str] = []
     try:
         doc = fitz.open(str(pdf_path))
         metrics["page_count"] = len(doc)
         for index, page in enumerate(doc, start=1):
             text = page.get_text("text") or ""
-            count = len(text.strip())
+            stripped = text.strip()
+            count = len(stripped)
+            all_text.append(stripped)
+            quality = text_quality_metrics(stripped, bad_token_threshold)
             metrics["page_text_char_counts"].append(count)
+            metrics["page_quality"].append({"page": index, **quality})
             if count < threshold:
                 metrics["low_text_pages"].append(index)
+            if quality.get("bad_ocr_detected"):
+                metrics["bad_ocr_pages"].append(index)
         doc.close()
     except Exception as exc:
         logger.warning("Could not analyze text layer for %s: %s", pdf_path, exc)
@@ -118,11 +194,12 @@ def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
         return metrics
 
     counts = metrics["page_text_char_counts"]
+    overall_quality = text_quality_metrics("\n".join(all_text), bad_token_threshold)
+    metrics["overall_quality"] = overall_quality
     metrics["has_extractable_text"] = any(count > 0 for count in counts)
     metrics["needs_ocr"] = bool(metrics["low_text_pages"])
+    metrics["bad_ocr_detected"] = bool(metrics["bad_ocr_pages"] or overall_quality.get("bad_ocr_detected"))
     return metrics
-
-
 def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     """Run OCRmyPDF and return the command plus CompletedProcess."""
     cmd = [
@@ -159,25 +236,36 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
 
 
 def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Path) -> Path:
-    """Optionally OCR the chunk before OpenDataLoader tagging."""
+    """Optionally OCR the chunk before OpenDataLoader tagging.
+
+    OCR_MODE=auto now means quality-aware auto mode:
+      - no/low text layer: run OCRmyPDF --skip-text
+      - good text layer: skip OCR
+      - corrupt existing OCR/text: run OCRmyPDF --redo-ocr by default
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     mode = os.environ.get("OCR_MODE", "auto").strip().lower()
     threshold = env_int("OCR_TEXT_THRESHOLD", 20)
-    language = os.environ.get("OCR_LANGUAGE", "eng").strip() or "eng"
+    language = os.environ.get("OCR_LANGUAGE", "eng+spa+fra").strip() or "eng"
     on_failure = os.environ.get("OCR_ON_FAILURE", "fail").strip().lower()
+    bad_text_action = os.environ.get("OCR_BAD_TEXT_ACTION", "redo").strip().lower()
 
     allowed_modes = {"auto", "always", "off", "redo", "force"}
     if mode not in allowed_modes:
         raise ValueError(f"Unsupported OCR_MODE={mode!r}; expected one of {sorted(allowed_modes)}")
     if on_failure not in {"fail", "fallback"}:
         raise ValueError("OCR_ON_FAILURE must be 'fail' or 'fallback'")
+    if bad_text_action not in {"redo", "force", "off"}:
+        raise ValueError("OCR_BAD_TEXT_ACTION must be 'redo', 'force', or 'off'")
 
     metrics = analyze_text_layer(downloaded_pdf, threshold)
     report: dict[str, Any] = {
         "ocr_mode": mode,
         "ocr_language": language,
         "ocr_text_threshold": threshold,
+        "ocr_bad_text_action": bad_text_action,
+        "ocr_bad_text_threshold": os.environ.get("OCR_BAD_TEXT_THRESHOLD", "0.08"),
         "ocr_on_failure": on_failure,
         "preflight": metrics,
         "ocr_attempted": False,
@@ -192,26 +280,35 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
         logger.info(report["decision"])
         return downloaded_pdf
 
-    should_run = False
+    effective_mode: str | None = None
     if mode == "auto":
-        should_run = bool(metrics.get("needs_ocr"))
-        report["decision"] = (
-            "Running OCR because one or more pages are below the text threshold."
-            if should_run
-            else "Skipping OCR because all pages have enough extractable text."
-        )
-    elif mode in {"always", "redo", "force"}:
-        should_run = True
+        if metrics.get("bad_ocr_detected") and metrics.get("has_extractable_text"):
+            if bad_text_action == "off":
+                report["decision"] = "Bad existing OCR detected, but OCR_BAD_TEXT_ACTION=off; skipping OCR."
+            else:
+                effective_mode = bad_text_action
+                report["decision"] = f"Bad existing OCR detected; running OCRmyPDF --{effective_mode}-ocr."
+        elif metrics.get("needs_ocr"):
+            effective_mode = "auto"  # maps to OCRmyPDF --skip-text
+            report["decision"] = "Running OCR because one or more pages are below the text threshold."
+        else:
+            report["decision"] = "Skipping OCR because text layer appears usable."
+    elif mode == "always":
+        effective_mode = "auto"  # maps to --skip-text
+        report["decision"] = "Running OCR because OCR_MODE=always."
+    elif mode in {"redo", "force"}:
+        effective_mode = mode
         report["decision"] = f"Running OCR because OCR_MODE={mode}."
 
-    if not should_run:
+    if not effective_mode:
         (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         logger.info(report["decision"])
         return downloaded_pdf
 
     ocr_pdf = work_dir / f"ocr_{downloaded_pdf.name}"
     report["ocr_attempted"] = True
-    cmd, completed = run_ocrmypdf(downloaded_pdf, ocr_pdf, mode, language)
+    report["effective_ocr_mode"] = effective_mode
+    cmd, completed = run_ocrmypdf(downloaded_pdf, ocr_pdf, effective_mode, language)
     report["ocr_command"] = cmd
     report["ocr_returncode"] = completed.returncode
 
@@ -235,8 +332,6 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
 
     (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     raise RuntimeError(f"OCRmyPDF failed with exit code {completed.returncode}")
-
-
 def add_viewer_preferences(input_pdf: Path, output_pdf: Path) -> None:
     """Set DisplayDocTitle without relying on Adobe."""
     reader = PdfReader(str(input_pdf))
