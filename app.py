@@ -209,10 +209,28 @@ class PDFAccessibility(Stack):
                                                   name="S3_CHUNK_KEY",
                                                   value=sfn.JsonPath.string_at("$.chunk_key")
                                               ),
-                                            tasks.TaskEnvironmentVariable(
+                                              tasks.TaskEnvironmentVariable(
                                                   name="AWS_REGION",
                                                   value=region
                                               ),
+                                              tasks.TaskEnvironmentVariable(name="OCR_MODE", value=os.environ.get("OCR_MODE", "auto")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_TEXT_THRESHOLD", value=os.environ.get("OCR_TEXT_THRESHOLD", "20")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_LANGUAGE", value=os.environ.get("OCR_LANGUAGE", "eng+spa+fra")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_ON_FAILURE", value=os.environ.get("OCR_ON_FAILURE", "fail")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_OPTIMIZE", value=os.environ.get("OCR_OPTIMIZE", "1")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_BAD_TEXT_ACTION", value=os.environ.get("OCR_BAD_TEXT_ACTION", "redo")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_BAD_TEXT_THRESHOLD", value=os.environ.get("OCR_BAD_TEXT_THRESHOLD", "0.08")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_FORCE_FALLBACK", value=os.environ.get("OCR_FORCE_FALLBACK", "true")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_FORCE_FALLBACK_ON_BAD_TEXT", value=os.environ.get("OCR_FORCE_FALLBACK_ON_BAD_TEXT", "false")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID", value=os.environ.get("ODL_HYBRID", "off")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_MODE", value=os.environ.get("ODL_HYBRID_MODE", "auto")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_FALLBACK", value=os.environ.get("ODL_HYBRID_FALLBACK", "true")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_TIMEOUT_MS", value=os.environ.get("ODL_HYBRID_TIMEOUT_MS", "60000")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_START_SERVER", value=os.environ.get("ODL_HYBRID_START_SERVER", "true")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_PORT", value=os.environ.get("ODL_HYBRID_PORT", "5002")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_STARTUP_TIMEOUT", value=os.environ.get("ODL_HYBRID_STARTUP_TIMEOUT", "120")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_TABLE_METHOD", value=os.environ.get("ODL_TABLE_METHOD", "")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_INCLUDE_HEADER_FOOTER", value=os.environ.get("ODL_INCLUDE_HEADER_FOOTER", "false")),
                                           ]
                                       )],
                                       launch_target=tasks.EcsFargateLaunchTarget(
@@ -242,19 +260,6 @@ class PDFAccessibility(Stack):
                                                   name="AWS_REGION",
                                                   value=region
                                               ),
-                                              tasks.TaskEnvironmentVariable(name="OCR_MODE", value=os.environ.get("OCR_MODE", "auto")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_TEXT_THRESHOLD", value=os.environ.get("OCR_TEXT_THRESHOLD", "20")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_LANGUAGE", value=os.environ.get("OCR_LANGUAGE", "eng")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_ON_FAILURE", value=os.environ.get("OCR_ON_FAILURE", "fail")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID", value=os.environ.get("ODL_HYBRID", "off")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_MODE", value=os.environ.get("ODL_HYBRID_MODE", "auto")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_FALLBACK", value=os.environ.get("ODL_HYBRID_FALLBACK", "true")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_TIMEOUT_MS", value=os.environ.get("ODL_HYBRID_TIMEOUT_MS", "60000")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_START_SERVER", value=os.environ.get("ODL_HYBRID_START_SERVER", "true")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_PORT", value=os.environ.get("ODL_HYBRID_PORT", "5002")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_STARTUP_TIMEOUT", value=os.environ.get("ODL_HYBRID_STARTUP_TIMEOUT", "120")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_TABLE_METHOD", value=os.environ.get("ODL_TABLE_METHOD", "")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_INCLUDE_HEADER_FOOTER", value=os.environ.get("ODL_INCLUDE_HEADER_FOOTER", "false")),
                                           ]
                                       )],
                                       launch_target=tasks.EcsFargateLaunchTarget(
@@ -366,31 +371,57 @@ class PDFAccessibility(Stack):
         )
 
         post_remediation_accessibility_checker = lambda_.Function(
-            self,'PostRemediationAccessibilityAuditor',
+            self, 'PostRemediationAccessibilityAuditor',
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler='main.lambda_handler',
             code=lambda_.Code.from_docker_build('lambda/post-remediation-accessibility-checker'),
+            environment={
+                'DOCUMENT_LANGUAGE_MODE': os.environ.get('DOCUMENT_LANGUAGE_MODE', 'auto'),
+                'DOCUMENT_LANGUAGE_OVERRIDE': os.environ.get('DOCUMENT_LANGUAGE_OVERRIDE', ''),
+                'DOCUMENT_LANGUAGE_CONFIDENCE_THRESHOLD': os.environ.get('DOCUMENT_LANGUAGE_CONFIDENCE_THRESHOLD', '0.75'),
+                'DOCUMENT_LANGUAGE_USE_BEDROCK': os.environ.get('DOCUMENT_LANGUAGE_USE_BEDROCK', 'true'),
+                'DOCUMENT_LANGUAGE_MODEL': os.environ.get('DOCUMENT_LANGUAGE_MODEL', 'us.amazon.nova-lite-v1:0'),
+                'FINALIZER_SET_TABS': os.environ.get('FINALIZER_SET_TABS', 'true'),
+                'PDF_TAB_ORDER': os.environ.get('PDF_TAB_ORDER', 'S'),
+                'AI_IMAGE_REVIEW_MODE': os.environ.get('AI_IMAGE_REVIEW_MODE', 'apply'),
+                'AI_IMAGE_REVIEW_MODEL': os.environ.get('AI_IMAGE_REVIEW_MODEL', os.environ.get('DOCUMENT_LANGUAGE_MODEL', 'us.amazon.nova-lite-v1:0')),
+                'AI_IMAGE_REVIEW_MAX_IMAGES': os.environ.get('AI_IMAGE_REVIEW_MAX_IMAGES', '8'),
+                'AI_IMAGE_APPLY_MIN_CONFIDENCE': os.environ.get('AI_IMAGE_APPLY_MIN_CONFIDENCE', '0.60'),
+                'OCR_BAD_TEXT_THRESHOLD': os.environ.get('OCR_BAD_TEXT_THRESHOLD', '0.08'),
+            },
             timeout=Duration.seconds(900),
-            memory_size=512,
+            memory_size=1024,
             architecture=lambda_arch,
         )
-        
+
         post_remediation_accessibility_checker.add_to_role_policy(
             iam.PolicyStatement(
-            actions=["secretsmanager:GetSecretValue"],
-            resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:/myapp/*"]
-        ))
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:/myapp/*"]
+            )
+        )
         pdf_processing_bucket.grant_read_write(post_remediation_accessibility_checker)
         post_remediation_accessibility_checker.add_to_role_policy(cloudwatch_metrics_policy)
+        post_remediation_accessibility_checker.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            )
+        )
+        post_remediation_accessibility_checker.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
 
         post_remediation_accessibility_checker_task = tasks.LambdaInvoke(
-            self, 
-            "AuditPostRemediationAccessibility",
+            self, "AuditPostRemediationAccessibility",
             lambda_function=post_remediation_accessibility_checker,
             payload=sfn.TaskInput.from_json_path_at("$"),
             output_path="$.Payload"
         )
-        
+
         remediation_chain = pdf_chunks_map_state.next(pdf_merger_lambda_task).next(title_generator_lambda_task).next(post_remediation_accessibility_checker_task)
 
         parallel_accessibility_workflow = sfn.Parallel(self, "ParallelAccessibilityWorkflow",
