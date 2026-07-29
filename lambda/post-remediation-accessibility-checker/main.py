@@ -5,11 +5,12 @@ Runs after merge + title generation. It performs deterministic cleanup and limit
 - Sets document-level /Lang when language detection is confident.
 - Sets per-page /Tabs /S so tab order follows the structure tree.
 - Produces QA JSON for tags, OCR quality, language, tab order, figures/images, and generic alt text.
-- Optionally uses Bedrock for language disambiguation and meaningful-image alt text suggestions.
+- Optionally uses Bedrock for language disambiguation and meaningful-image alt text.
+- Maps image decisions to Figure structure nodes by page before writing /Alt values.
 
-This Lambda intentionally does not rewrite the PDF tag tree for images yet. It reports artifact
-candidates and alt text suggestions so the next safe mapping step can update Figure structure
-nodes with confidence.
+For scanned pages, Bedrock describes only meaningful non-text visuals (for example, a portrait
+or chart) because the OCR text layer already represents the page's text. It does not invent a
+separate Figure region that is absent from the source PDF structure.
 """
 
 from __future__ import annotations
@@ -147,6 +148,14 @@ def extract_pdf_text(pdf_path: Path, max_chars: int = 25000) -> tuple[str, list[
     return "\n".join(parts)[:max_chars], page_counts
 
 
+def extract_page_text(pdf_path: Path, max_chars_per_page: int = 4000) -> dict[int, str]:
+    page_text: dict[int, str] = {}
+    with fitz.open(str(pdf_path)) as doc:
+        for page_number, page in enumerate(doc, start=1):
+            page_text[page_number] = (page.get_text("text") or "")[:max_chars_per_page]
+    return page_text
+
+
 def ocr_quality_metrics(text: str) -> dict[str, Any]:
     stripped = text or ""
     total = len(stripped)
@@ -155,10 +164,16 @@ def ocr_quality_metrics(text: str) -> dict[str, Any]:
             "char_count": 0,
             "replacement_count": 0,
             "control_count": 0,
+            "private_use_count": 0,
+            "unassigned_count": 0,
             "suspicious_symbol_count": 0,
+            "suspicious_symbol_ratio": 0.0,
+            "private_or_unassigned_ratio": 0.0,
             "word_count": 0,
             "bad_token_count": 0,
             "bad_token_ratio": 0.0,
+            "sample_bad_tokens": [],
+            "encoding_issue_detected": False,
             "bad_ocr_detected": False,
         }
 
@@ -166,8 +181,10 @@ def ocr_quality_metrics(text: str) -> dict[str, Any]:
     control_count = sum(
         1
         for ch in stripped
-        if unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\r\t"
+        if unicodedata.category(ch) in {"Cc", "Cs"} and ch not in "\n\r\t"
     )
+    private_use_count = sum(1 for ch in stripped if unicodedata.category(ch) == "Co")
+    unassigned_count = sum(1 for ch in stripped if unicodedata.category(ch) == "Cn")
     suspicious_symbol_count = sum(1 for ch in stripped if ch in "@#$%^*_~=�")
     words = re.findall(r"\S+", stripped)
     bad_tokens = []
@@ -182,11 +199,16 @@ def ocr_quality_metrics(text: str) -> dict[str, Any]:
     word_count = len(words)
     bad_token_ratio = len(bad_tokens) / max(word_count, 1)
     suspicious_symbol_ratio = suspicious_symbol_count / max(total, 1)
-    control_ratio = control_count / max(total, 1)
+    private_or_unassigned_ratio = (private_use_count + unassigned_count) / max(total, 1)
 
-    bad_ocr_detected = bool(
+    encoding_issue_detected = bool(
         replacement_count > 0
         or control_count > 0
+        or private_or_unassigned_ratio >= 0.005
+    )
+
+    bad_ocr_detected = bool(
+        encoding_issue_detected
         or bad_token_ratio >= env_float("OCR_BAD_TEXT_THRESHOLD", 0.08)
         or suspicious_symbol_ratio >= 0.06
     )
@@ -195,12 +217,16 @@ def ocr_quality_metrics(text: str) -> dict[str, Any]:
         "char_count": total,
         "replacement_count": replacement_count,
         "control_count": control_count,
+        "private_use_count": private_use_count,
+        "unassigned_count": unassigned_count,
         "suspicious_symbol_count": suspicious_symbol_count,
         "suspicious_symbol_ratio": round(suspicious_symbol_ratio, 4),
+        "private_or_unassigned_ratio": round(private_or_unassigned_ratio, 4),
         "word_count": word_count,
         "bad_token_count": len(bad_tokens),
         "bad_token_ratio": round(bad_token_ratio, 4),
         "sample_bad_tokens": bad_tokens[:20],
+        "encoding_issue_detected": encoding_issue_detected,
         "bad_ocr_detected": bad_ocr_detected,
     }
 
@@ -479,18 +505,26 @@ Return strict JSON only. Do not include markdown.
 Classify the image and write alt text only if it is meaningful.
 Use nearby OCR text/captions when helpful.
 
+The source image detector classified this image as: {item.get("classification")}.
+
 Allowed classifications:
-- full_page_scan_background: page scan where OCR text already carries the content; should usually be artifact.
+- full_page_text_only: scanned page whose meaningful content is already represented by OCR text.
+- full_page_with_meaningful_visuals: scanned page containing a portrait, chart, diagram, map,
+  illustration, or other non-text visual that needs an accessible description.
 - decorative: decorative/non-informative graphic; should usually be artifact.
 - meaningful_figure: photo, chart, illustration, or image that conveys information.
 - uncertain: cannot determine safely.
+
+For a full-page scan, do not summarize or repeat the page text. If meaningful non-text visuals
+are present, describe only those visuals and use full_page_with_meaningful_visuals. If no such
+visual is present, use full_page_text_only and leave alt_text empty.
 
 Nearby text/caption candidate:
 {nearby_text[:2000]}
 
 Return JSON:
 {{
-  "classification": "meaningful_figure" | "decorative" | "full_page_scan_background" | "uncertain",
+  "classification": "meaningful_figure" | "decorative" | "full_page_text_only" | "full_page_with_meaningful_visuals" | "uncertain",
   "confidence": 0.0,
   "alt_text": "" | "concise alt text",
   "caption_text": "" | "nearby caption text",
@@ -523,6 +557,7 @@ def image_review(pdf_path: Path, text: str) -> dict[str, Any]:
     images = analyze_page_images(pdf_path)
     full_page = [i for i in images if i["classification"] == "full_page_scan_background"]
     candidates = [i for i in images if i["classification"] == "meaningful_candidate"]
+    page_text = extract_page_text(pdf_path)
 
     report: dict[str, Any] = {
         "mode": mode,
@@ -537,10 +572,20 @@ def image_review(pdf_path: Path, text: str) -> dict[str, Any]:
     if mode in {"off", "false", "none"}:
         return report
 
-    # Only call Bedrock for non-full-page candidates, capped to avoid surprise cost.
-    for item in candidates[:max_images]:
+    # Review native image candidates first, then scanned pages. A scanned page may contain a
+    # meaningful portrait/chart baked into the page raster, which PDF XObject inspection alone
+    # cannot expose as a separate image.
+    review_candidates = (candidates + full_page)[:max_images]
+    report["ai_review_candidate_count"] = len(candidates) + len(full_page)
+    report["ai_review_limited_count"] = max(0, len(candidates) + len(full_page) - len(review_candidates))
+
+    for item in review_candidates:
         try:
-            review = bedrock_alt_for_image(pdf_path, item, text)
+            review = bedrock_alt_for_image(
+                pdf_path,
+                item,
+                page_text.get(int(item.get("page") or 0), text[:4000]),
+            )
             report["ai_reviews"].append({"image": item, "review": review})
         except Exception as exc:
             logger.exception("AI image review failed for page %s xref %s: %s", item.get("page"), item.get("xref"), exc)
@@ -553,11 +598,52 @@ def should_update_alt_text(value: Any) -> bool:
     alt = str(value or "").strip()
     if not alt:
         return True
-    return bool(GENERIC_ALT_RE.match(alt))
+    return bool(
+        GENERIC_ALT_RE.match(alt)
+        or alt.casefold().startswith("scanned page image;")
+    )
 
 
-def struct_figure_elements(node: Any) -> list[DictionaryObject]:
-    figures: list[DictionaryObject] = []
+def indirect_reference_key(obj: Any) -> tuple[int, int] | None:
+    if obj is None:
+        return None
+    if hasattr(obj, "idnum"):
+        return (int(obj.idnum), int(getattr(obj, "generation", 0)))
+    try:
+        resolved = get_root_object(obj)
+    except Exception:
+        return None
+    reference = getattr(resolved, "indirect_reference", None)
+    if reference is not None and hasattr(reference, "idnum"):
+        return (int(reference.idnum), int(getattr(reference, "generation", 0)))
+    return None
+
+
+def page_number_from_struct_node(node: DictionaryObject, page_lookup: dict[tuple[int, int], int]) -> int | None:
+    page_number = page_lookup.get(indirect_reference_key(node.get("/Pg")))
+    if page_number is not None:
+        return page_number
+
+    kids = node.get("/K")
+    kid_values = kids if isinstance(kids, list) else [kids]
+    for kid in kid_values:
+        try:
+            kid_obj = get_root_object(kid)
+        except Exception:
+            continue
+        if isinstance(kid_obj, DictionaryObject):
+            page_number = page_lookup.get(indirect_reference_key(kid_obj.get("/Pg")))
+            if page_number is not None:
+                return page_number
+    return None
+
+
+def struct_figure_records(
+    node: Any,
+    page_lookup: dict[tuple[int, int], int],
+    inherited_page: int | None = None,
+) -> list[dict[str, Any]]:
+    figures: list[dict[str, Any]] = []
 
     try:
         node = get_root_object(node)
@@ -565,16 +651,17 @@ def struct_figure_elements(node: Any) -> list[DictionaryObject]:
         return figures
 
     if isinstance(node, DictionaryObject):
+        node_page = page_number_from_struct_node(node, page_lookup) or inherited_page
         tag = str(node.get("/S") or "").lstrip("/")
         if tag.lower() == "figure":
-            figures.append(node)
+            figures.append({"element": node, "page": node_page})
 
         kids = node.get("/K")
         if isinstance(kids, list):
             for kid in kids:
-                figures.extend(struct_figure_elements(kid))
+                figures.extend(struct_figure_records(kid, page_lookup, node_page))
         elif kids is not None and not isinstance(kids, (int, float)):
-            figures.extend(struct_figure_elements(kids))
+            figures.extend(struct_figure_records(kids, page_lookup, node_page))
 
     return figures
 
@@ -601,22 +688,38 @@ def build_alt_decisions(image_report: dict[str, Any]) -> list[dict[str, Any]]:
     for item in image_report.get("items", []):
         classification = item.get("classification")
         review = review_by_key.get(image_key(item), {})
+        review_class = str(review.get("classification") or "").strip()
+        review_conf = float(review.get("confidence") or 0.0)
+        candidate_alt = str(review.get("alt_text") or "").strip()
 
         alt_text = ""
         source = "none"
         needs_manual_review = False
 
         if classification == "full_page_scan_background":
-            alt_text = "Scanned page image; text content is available in the document text layer."
-            source = "deterministic_full_page_scan"
+            if (
+                review_class in {"full_page_with_meaningful_visuals", "meaningful_figure"}
+                and candidate_alt
+                and review_conf >= min_conf
+            ):
+                alt_text = candidate_alt
+                source = "bedrock_scanned_page_visuals"
+            elif review_class in {"full_page_text_only", "decorative"} and review_conf >= min_conf:
+                alt_text = "Scanned page image; all meaningful text is available in the document text layer."
+                source = f"bedrock_{review_class}"
+            elif review:
+                needs_manual_review = True
+                source = "manual_review_required"
+            else:
+                # Retain a deterministic fallback when the Bedrock review cap is reached or the
+                # model call fails; QA records that no AI-specific visual description was applied.
+                alt_text = "Scanned page image; text content is available in the document text layer."
+                source = "deterministic_full_page_scan_unreviewed"
+                needs_manual_review = True
         elif classification == "small_decorative_or_noise":
             alt_text = "Decorative image."
             source = "deterministic_decorative"
         elif classification == "meaningful_candidate":
-            review_class = str(review.get("classification") or "").strip()
-            review_conf = float(review.get("confidence") or 0.0)
-            candidate_alt = str(review.get("alt_text") or "").strip()
-
             if review_class == "meaningful_figure" and candidate_alt and review_conf >= min_conf:
                 alt_text = candidate_alt
                 source = "bedrock"
@@ -660,6 +763,8 @@ def apply_image_alt_text_to_figures(writer: PdfWriter, image_report: dict[str, A
         "skipped_no_decision_count": 0,
         "manual_review_count": 0,
         "notes": [],
+        "page_mapped_count": 0,
+        "order_fallback_mapped_count": 0,
     }
 
     if mode not in {"apply", "write", "true", "yes", "on"}:
@@ -675,29 +780,70 @@ def apply_image_alt_text_to_figures(writer: PdfWriter, image_report: dict[str, A
     struct_root = get_root_object(struct_root)
     kids = struct_root.get("/K") if isinstance(struct_root, DictionaryObject) else None
 
-    figures: list[DictionaryObject] = []
+    page_lookup: dict[tuple[int, int], int] = {}
+    for page_number, page in enumerate(writer.pages, start=1):
+        key = indirect_reference_key(page)
+        if key is not None:
+            page_lookup[key] = page_number
+
+    figures: list[dict[str, Any]] = []
     if isinstance(kids, list):
         for kid in kids:
-            figures.extend(struct_figure_elements(kid))
+            figures.extend(struct_figure_records(kid, page_lookup))
     elif kids is not None:
-        figures.extend(struct_figure_elements(kids))
+        figures.extend(struct_figure_records(kids, page_lookup))
 
     decisions = build_alt_decisions(image_report)
     result["attempted"] = True
     result["figure_count"] = len(figures)
     result["decisions_count"] = len(decisions)
 
-    for index, fig in enumerate(figures):
-        if index >= len(decisions):
-            result["skipped_no_decision_count"] += 1
-            continue
+    decisions_by_page: dict[int, list[dict[str, Any]]] = {}
+    for decision in decisions:
+        page_number = decision.get("page")
+        if isinstance(page_number, int):
+            decisions_by_page.setdefault(page_number, []).append(decision)
+
+    figures_by_page: dict[int, list[dict[str, Any]]] = {}
+    unknown_page_figures: list[dict[str, Any]] = []
+    for record in figures:
+        page_number = record.get("page")
+        if isinstance(page_number, int):
+            figures_by_page.setdefault(page_number, []).append(record)
+        else:
+            unknown_page_figures.append(record)
+
+    mapped: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for page_number, page_figures in figures_by_page.items():
+        page_decisions = decisions_by_page.get(page_number, [])
+        for record, decision in zip(page_figures, page_decisions):
+            mapped.append((record, decision))
+            result["page_mapped_count"] += 1
+        result["skipped_no_decision_count"] += max(0, len(page_figures) - len(page_decisions))
+
+    if unknown_page_figures:
+        mapped_decision_ids = {id(decision) for _, decision in mapped}
+        remaining_decisions = [decision for decision in decisions if id(decision) not in mapped_decision_ids]
+        if len(unknown_page_figures) == len(remaining_decisions):
+            mapped.extend(zip(unknown_page_figures, remaining_decisions))
+            result["order_fallback_mapped_count"] = len(unknown_page_figures)
+            result["notes"].append(
+                "Some Figure tags had no page reference; used order fallback because remaining counts matched exactly."
+            )
+        else:
+            result["skipped_no_decision_count"] += len(unknown_page_figures)
+            result["notes"].append(
+                "Figure tags without page references were not updated because a safe one-to-one fallback was unavailable."
+            )
+
+    for record, decision in mapped:
+        fig = record["element"]
 
         current_alt = fig.get("/Alt")
         if not should_update_alt_text(current_alt):
             result["skipped_existing_specific_alt_count"] += 1
             continue
 
-        decision = decisions[index]
         alt_text = str(decision.get("alt_text") or "").strip()
 
         if not alt_text:

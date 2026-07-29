@@ -209,10 +209,28 @@ class PDFAccessibility(Stack):
                                                   name="S3_CHUNK_KEY",
                                                   value=sfn.JsonPath.string_at("$.chunk_key")
                                               ),
-                                            tasks.TaskEnvironmentVariable(
+                                              tasks.TaskEnvironmentVariable(
                                                   name="AWS_REGION",
                                                   value=region
                                               ),
+                                              tasks.TaskEnvironmentVariable(name="OCR_MODE", value=os.environ.get("OCR_MODE", "auto")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_TEXT_THRESHOLD", value=os.environ.get("OCR_TEXT_THRESHOLD", "20")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_LANGUAGE", value=os.environ.get("OCR_LANGUAGE", "eng+spa+fra")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_ON_FAILURE", value=os.environ.get("OCR_ON_FAILURE", "fail")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_OPTIMIZE", value=os.environ.get("OCR_OPTIMIZE", "1")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_BAD_TEXT_ACTION", value=os.environ.get("OCR_BAD_TEXT_ACTION", "redo")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_BAD_TEXT_THRESHOLD", value=os.environ.get("OCR_BAD_TEXT_THRESHOLD", "0.08")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_FORCE_FALLBACK", value=os.environ.get("OCR_FORCE_FALLBACK", "true")),
+                                              tasks.TaskEnvironmentVariable(name="OCR_FORCE_FALLBACK_ON_BAD_TEXT", value=os.environ.get("OCR_FORCE_FALLBACK_ON_BAD_TEXT", "false")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID", value=os.environ.get("ODL_HYBRID", "off")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_MODE", value=os.environ.get("ODL_HYBRID_MODE", "auto")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_FALLBACK", value=os.environ.get("ODL_HYBRID_FALLBACK", "true")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_TIMEOUT_MS", value=os.environ.get("ODL_HYBRID_TIMEOUT_MS", "60000")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_START_SERVER", value=os.environ.get("ODL_HYBRID_START_SERVER", "true")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_PORT", value=os.environ.get("ODL_HYBRID_PORT", "5002")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_STARTUP_TIMEOUT", value=os.environ.get("ODL_HYBRID_STARTUP_TIMEOUT", "120")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_TABLE_METHOD", value=os.environ.get("ODL_TABLE_METHOD", "")),
+                                              tasks.TaskEnvironmentVariable(name="ODL_INCLUDE_HEADER_FOOTER", value=os.environ.get("ODL_INCLUDE_HEADER_FOOTER", "false")),
                                           ]
                                       )],
                                       launch_target=tasks.EcsFargateLaunchTarget(
@@ -242,19 +260,6 @@ class PDFAccessibility(Stack):
                                                   name="AWS_REGION",
                                                   value=region
                                               ),
-                                              tasks.TaskEnvironmentVariable(name="OCR_MODE", value=os.environ.get("OCR_MODE", "auto")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_TEXT_THRESHOLD", value=os.environ.get("OCR_TEXT_THRESHOLD", "20")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_LANGUAGE", value=os.environ.get("OCR_LANGUAGE", "eng")),
-                                              tasks.TaskEnvironmentVariable(name="OCR_ON_FAILURE", value=os.environ.get("OCR_ON_FAILURE", "fail")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID", value=os.environ.get("ODL_HYBRID", "off")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_MODE", value=os.environ.get("ODL_HYBRID_MODE", "auto")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_FALLBACK", value=os.environ.get("ODL_HYBRID_FALLBACK", "true")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_TIMEOUT_MS", value=os.environ.get("ODL_HYBRID_TIMEOUT_MS", "60000")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_START_SERVER", value=os.environ.get("ODL_HYBRID_START_SERVER", "true")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_PORT", value=os.environ.get("ODL_HYBRID_PORT", "5002")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_HYBRID_STARTUP_TIMEOUT", value=os.environ.get("ODL_HYBRID_STARTUP_TIMEOUT", "120")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_TABLE_METHOD", value=os.environ.get("ODL_TABLE_METHOD", "")),
-                                              tasks.TaskEnvironmentVariable(name="ODL_INCLUDE_HEADER_FOOTER", value=os.environ.get("ODL_INCLUDE_HEADER_FOOTER", "false")),
                                           ]
                                       )],
                                       launch_target=tasks.EcsFargateLaunchTarget(
