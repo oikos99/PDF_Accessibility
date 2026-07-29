@@ -16,7 +16,7 @@ OpenDataLoader artifacts are uploaded under:
     temp/{file_basename}/opendataloader/{chunk_filename}/...
 
 OCR behavior:
-    OCR_MODE=auto   default; run OCRmyPDF only if one or more pages have little/no text.
+    OCR_MODE=auto   default; skip good text, OCR low-text pages, redo suspicious existing OCR.
     OCR_MODE=always always run OCRmyPDF --skip-text.
     OCR_MODE=off    never OCR.
     OCR_MODE=redo   run OCRmyPDF --redo-ocr; useful for bad existing OCR.
@@ -24,8 +24,11 @@ OCR behavior:
 
 Additional env vars:
     OCR_TEXT_THRESHOLD=20   page is considered low-text below this many extractable chars.
-    OCR_LANGUAGE=eng        Tesseract language code.
+    OCR_LANGUAGE=eng+spa+fra Tesseract language codes installed in this image.
     OCR_ON_FAILURE=fail     fail or fallback. fallback uses original PDF if OCRmyPDF fails.
+    OCR_OPTIMIZE=1          lossless OCRmyPDF optimization; reduces force-OCR file growth.
+    OCR_FORCE_FALLBACK=true allow redo -> force fallback for definite encoding failures.
+    OCR_FORCE_FALLBACK_ON_BAD_TEXT=false do not force OCR for broad text heuristics alone.
 """
 
 from __future__ import annotations
@@ -92,6 +95,23 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def file_size_metrics(input_pdf: Path, output_pdf: Path) -> dict[str, Any]:
+    input_bytes = input_pdf.stat().st_size if input_pdf.exists() else 0
+    output_bytes = output_pdf.stat().st_size if output_pdf.exists() else 0
+    return {
+        "input_bytes": input_bytes,
+        "output_bytes": output_bytes,
+        "output_to_input_ratio": round(output_bytes / input_bytes, 3) if input_bytes else None,
+    }
+
+
 def text_quality_metrics(text: str, bad_token_threshold: float = 0.08) -> dict[str, Any]:
     """Detect corrupt existing OCR/text layers without assuming English-only text."""
     stripped = text or ""
@@ -101,10 +121,16 @@ def text_quality_metrics(text: str, bad_token_threshold: float = 0.08) -> dict[s
             "char_count": 0,
             "replacement_count": 0,
             "control_count": 0,
+            "private_use_count": 0,
+            "unassigned_count": 0,
             "suspicious_symbol_count": 0,
+            "suspicious_symbol_ratio": 0.0,
+            "private_or_unassigned_ratio": 0.0,
             "word_count": 0,
             "bad_token_count": 0,
             "bad_token_ratio": 0.0,
+            "sample_bad_tokens": [],
+            "encoding_issue_detected": False,
             "bad_ocr_detected": False,
         }
 
@@ -112,8 +138,10 @@ def text_quality_metrics(text: str, bad_token_threshold: float = 0.08) -> dict[s
     control_count = sum(
         1
         for ch in stripped
-        if unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\r\t"
+        if unicodedata.category(ch) in {"Cc", "Cs"} and ch not in "\n\r\t"
     )
+    private_use_count = sum(1 for ch in stripped if unicodedata.category(ch) == "Co")
+    unassigned_count = sum(1 for ch in stripped if unicodedata.category(ch) == "Cn")
     suspicious_symbol_count = sum(1 for ch in stripped if ch in "@#$%^*_~=�")
 
     words = re.findall(r"\S+", stripped)
@@ -130,26 +158,37 @@ def text_quality_metrics(text: str, bad_token_threshold: float = 0.08) -> dict[s
     word_count = len(words)
     bad_token_ratio = len(bad_tokens) / max(word_count, 1)
     suspicious_symbol_ratio = suspicious_symbol_count / max(total, 1)
-    control_ratio = control_count / max(total, 1)
+    private_or_unassigned_ratio = (private_use_count + unassigned_count) / max(total, 1)
 
-    bad_ocr_detected = bool(
+    # Keep the definite character-encoding signal separate from the broader
+    # suspicious-text heuristic. The latter can be triggered by legitimate
+    # math, code, or multilingual text and must not cause force OCR by default.
+    encoding_issue_detected = bool(
         replacement_count > 0
         or control_count > 0
+        or private_or_unassigned_ratio >= 0.005
+    )
+
+    bad_ocr_detected = bool(
+        encoding_issue_detected
         or bad_token_ratio >= bad_token_threshold
         or suspicious_symbol_ratio >= 0.06
-        or control_ratio >= 0.01
     )
 
     return {
         "char_count": total,
         "replacement_count": replacement_count,
         "control_count": control_count,
+        "private_use_count": private_use_count,
+        "unassigned_count": unassigned_count,
         "suspicious_symbol_count": suspicious_symbol_count,
         "suspicious_symbol_ratio": round(suspicious_symbol_ratio, 4),
+        "private_or_unassigned_ratio": round(private_or_unassigned_ratio, 4),
         "word_count": word_count,
         "bad_token_count": len(bad_tokens),
         "bad_token_ratio": round(bad_token_ratio, 4),
         "sample_bad_tokens": bad_tokens[:20],
+        "encoding_issue_detected": encoding_issue_detected,
         "bad_ocr_detected": bad_ocr_detected,
     }
 
@@ -162,11 +201,13 @@ def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
         "page_text_char_counts": [],
         "low_text_pages": [],
         "bad_ocr_pages": [],
+        "encoding_issue_pages": [],
         "threshold": threshold,
         "bad_text_threshold": bad_token_threshold,
         "has_extractable_text": False,
         "needs_ocr": False,
         "bad_ocr_detected": False,
+        "encoding_issue_detected": False,
         "page_quality": [],
     }
 
@@ -186,6 +227,8 @@ def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
                 metrics["low_text_pages"].append(index)
             if quality.get("bad_ocr_detected"):
                 metrics["bad_ocr_pages"].append(index)
+            if quality.get("encoding_issue_detected"):
+                metrics["encoding_issue_pages"].append(index)
         doc.close()
     except Exception as exc:
         logger.warning("Could not analyze text layer for %s: %s", pdf_path, exc)
@@ -199,13 +242,19 @@ def analyze_text_layer(pdf_path: Path, threshold: int) -> dict[str, Any]:
     metrics["has_extractable_text"] = any(count > 0 for count in counts)
     metrics["needs_ocr"] = bool(metrics["low_text_pages"])
     metrics["bad_ocr_detected"] = bool(metrics["bad_ocr_pages"] or overall_quality.get("bad_ocr_detected"))
+    metrics["encoding_issue_detected"] = bool(
+        metrics["encoding_issue_pages"] or overall_quality.get("encoding_issue_detected")
+    )
     return metrics
+
+
 def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     """Run OCRmyPDF and return the command plus CompletedProcess.
 
     Important: OCRmyPDF --redo-ocr is not compatible with --deskew.
     Use --deskew for new OCR/force OCR, but not redo OCR.
     """
+    optimize = max(0, min(env_int("OCR_OPTIMIZE", 1), 3))
     cmd = [
         "ocrmypdf",
         "--jobs",
@@ -214,7 +263,7 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
         "pdf",
         "--rotate-pages",
         "--optimize",
-        "0",
+        str(optimize),
         "--language",
         language,
     ]
@@ -236,6 +285,41 @@ def run_ocrmypdf(input_pdf: Path, output_pdf: Path, mode: str, language: str) ->
     if completed.stderr:
         logger.info("OCRmyPDF stderr:\n%s", completed.stderr)
     return cmd, completed
+
+
+def force_fallback_decision(
+    effective_mode: str,
+    stderr: str,
+    post_ocr_metrics: dict[str, Any],
+) -> tuple[bool, dict[str, bool]]:
+    stderr_lower = (stderr or "").lower()
+    redo_warning_needs_force = (
+        "cannot be mapped to characters" in stderr_lower
+        or "consider using --force-ocr" in stderr_lower
+        or "damaged character map" in stderr_lower
+    )
+    force_fallback_enabled = env_bool("OCR_FORCE_FALLBACK", True)
+    force_on_bad_text = env_bool("OCR_FORCE_FALLBACK_ON_BAD_TEXT", False)
+    redo_still_bad = bool(post_ocr_metrics.get("bad_ocr_detected"))
+    redo_encoding_still_bad = bool(post_ocr_metrics.get("encoding_issue_detected"))
+
+    reason = {
+        "redo_warning_needs_force": redo_warning_needs_force,
+        "redo_encoding_still_bad": redo_encoding_still_bad,
+        "redo_still_bad": redo_still_bad,
+        "force_on_suspicious_text_enabled": force_on_bad_text,
+    }
+    should_force = bool(
+        effective_mode == "redo"
+        and force_fallback_enabled
+        and (
+            redo_warning_needs_force
+            or redo_encoding_still_bad
+            or (force_on_bad_text and redo_still_bad)
+        )
+    )
+    return should_force, reason
+
 
 def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Path) -> Path:
     """Optionally OCR the chunk before OpenDataLoader tagging.
@@ -269,6 +353,7 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
         "ocr_bad_text_action": bad_text_action,
         "ocr_bad_text_threshold": os.environ.get("OCR_BAD_TEXT_THRESHOLD", "0.08"),
         "ocr_on_failure": on_failure,
+        "ocr_optimize": max(0, min(env_int("OCR_OPTIMIZE", 1), 3)),
         "preflight": metrics,
         "ocr_attempted": False,
         "ocr_succeeded": False,
@@ -322,33 +407,16 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
         post_ocr_metrics = analyze_text_layer(ocr_pdf, threshold)
         report["post_ocr_preflight"] = post_ocr_metrics
 
-        stderr_lower = (completed.stderr or "").lower()
-        redo_warning_needs_force = (
-            "cannot be mapped to characters" in stderr_lower
-            or "consider using --force-ocr" in stderr_lower
-            or "damaged character map" in stderr_lower
+        should_force, force_reason = force_fallback_decision(
+            effective_mode,
+            completed.stderr or "",
+            post_ocr_metrics,
         )
 
-        force_fallback_enabled = os.environ.get("OCR_FORCE_FALLBACK", "true").strip().lower() in {
-            "1", "true", "yes", "y", "on"
-        }
-        force_on_bad_text = os.environ.get("OCR_FORCE_FALLBACK_ON_BAD_TEXT", "true").strip().lower() in {
-            "1", "true", "yes", "y", "on"
-        }
-
-        redo_still_bad = bool(post_ocr_metrics.get("bad_ocr_detected"))
-
-        if (
-            effective_mode == "redo"
-            and force_fallback_enabled
-            and (redo_warning_needs_force or (force_on_bad_text and redo_still_bad))
-        ):
+        if should_force:
             force_pdf = work_dir / f"force_ocr_{downloaded_pdf.name}"
             report["force_fallback_attempted"] = True
-            report["force_fallback_reason"] = {
-                "redo_warning_needs_force": redo_warning_needs_force,
-                "redo_still_bad": redo_still_bad,
-            }
+            report["force_fallback_reason"] = force_reason
 
             force_cmd, force_completed = run_ocrmypdf(downloaded_pdf, force_pdf, "force", language)
             report["force_ocr_command"] = force_cmd
@@ -358,9 +426,26 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
 
             if force_completed.returncode == 0 and force_pdf.exists():
                 report["force_ocr_succeeded"] = True
+                post_force_metrics = analyze_text_layer(force_pdf, threshold)
+                report["post_force_ocr_preflight"] = post_force_metrics
+                report["force_ocr_size"] = file_size_metrics(downloaded_pdf, force_pdf)
+
+                if post_force_metrics.get("encoding_issue_detected"):
+                    report["force_ocr_succeeded"] = False
+                    report["decision_after_force_failure"] = (
+                        "Force OCR completed but definite character-encoding problems remain."
+                    )
+                    if on_failure == "fallback":
+                        report["ocr_output_used"] = True
+                        report["selected_input_for_opendataloader"] = str(ocr_pdf)
+                        (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+                        logger.warning("Force OCR still has encoding problems; using redo OCR output")
+                        return ocr_pdf
+                    (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+                    raise RuntimeError("Force OCR completed but character-encoding validation still failed")
+
                 report["ocr_output_used"] = True
                 report["selected_input_for_opendataloader"] = str(force_pdf)
-                report["post_force_ocr_preflight"] = analyze_text_layer(force_pdf, threshold)
                 (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
                 logger.info("Force OCR fallback succeeded; using %s for OpenDataLoader", force_pdf)
                 return force_pdf
@@ -380,6 +465,7 @@ def choose_pdf_for_tagging(downloaded_pdf: Path, work_dir: Path, output_dir: Pat
         report["ocr_output_used"] = True
         report["selected_input_for_opendataloader"] = str(ocr_pdf)
         report["force_fallback_attempted"] = False
+        report["ocr_output_size"] = file_size_metrics(downloaded_pdf, ocr_pdf)
         (output_dir / "ocr_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         logger.info("OCR succeeded; using %s for OpenDataLoader", ocr_pdf)
         return ocr_pdf
